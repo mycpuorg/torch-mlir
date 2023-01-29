@@ -56,8 +56,16 @@ config.standalone_tools_dir = os.path.join(config.torch_mlir_obj_root, 'bin')
 
 # Tweak the PATH to include the tools dir.
 llvm_config.with_environment('PATH', config.llvm_tools_dir, append_path=True)
+# Tweak the PATH to include the binary build dir, in order to pick up CAPI tests during out-of-tree.
+llvm_config.with_environment('PATH', os.path.join(config.llvm_build_dir, 'bin'), append_path=True)
 
-tool_dirs = [config.standalone_tools_dir, config.llvm_tools_dir]
+# On Windows the path to python could contains spaces in which case it needs to
+# be provided in quotes.  This is the equivalent of how %python is setup in
+# llvm/utils/lit/lit/llvm/config.py.
+if "Windows" in config.host_os:
+  config.python_executable = '"%s"' % (config.python_executable)
+
+tool_dirs = [config.standalone_tools_dir, config.llvm_tools_dir, config.torch_mlir_obj_root]
 tools = [
     'torch-mlir-opt',
     ToolSubst('%PYTHON', config.python_executable, unresolved='ignore'),

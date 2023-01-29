@@ -14,11 +14,45 @@ set(TORCH_MLIR_PYTHON_ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/torch_mlir")
 add_compile_definitions("MLIR_PYTHON_PACKAGE_PREFIX=torch_mlir.")
 
 ################################################################################
+# PyTorch
+################################################################################
+
+option(TORCH_MLIR_USE_INSTALLED_PYTORCH "Build from local PyTorch in environment" ON)
+
+if (NOT TORCH_MLIR_USE_INSTALLED_PYTORCH)
+  # Source builds
+  set(ENV{TORCH_MLIR_SRC_PYTORCH_REPO} ${TORCH_MLIR_SRC_PYTORCH_REPO})
+  set(ENV{TORCH_MLIR_SRC_PYTORCH_BRANCH} ${TORCH_MLIR_SRC_PYTORCH_BRANCH})
+  set(ENV{TM_PYTORCH_INSTALL_WITHOUT_REBUILD} ${TM_PYTORCH_INSTALL_WITHOUT_REBUILD})
+  set(ENV{MACOSX_DEPLOYMENT_TARGET} ${MACOSX_DEPLOYMENT_TARGET})
+  set(ENV{CMAKE_OSX_ARCHITECTURES} ${CMAKE_OSX_ARCHITECTURES})
+  set(ENV{CMAKE_C_COMPILER_LAUNCHER} ${CMAKE_C_COMPILER_LAUNCHER})
+  set(ENV{CMAKE_CXX_COMPILER_LAUNCHER} ${CMAKE_CXX_COMPILER_LAUNCHER})
+  execute_process(
+          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/../build_tools/build_libtorch.sh
+          RESULT_VARIABLE _result
+  )
+  if(_result)
+    message(FATAL_ERROR "Failed to run `build_libtorch.sh`")
+  endif()
+  set(TORCH_INSTALL_PREFIX "libtorch")
+endif()
+
+################################################################################
 # Sources
 ################################################################################
 
 declare_mlir_python_sources(TorchMLIRPythonSources)
 declare_mlir_python_sources(TorchMLIRPythonExtensions)
+
+declare_mlir_python_sources(TorchMLIRPythonSources.TopLevel
+  ROOT_DIR "${TORCH_MLIR_PYTHON_ROOT_DIR}"
+  ADD_TO_PARENT TorchMLIRPythonSources
+  SOURCES
+    __init__.py
+    compiler_utils.py
+    dynamo.py
+)
 
 declare_mlir_python_sources(TorchMLIRPythonSources.Dialects
   ROOT_DIR "${TORCH_MLIR_PYTHON_ROOT_DIR}"
@@ -49,6 +83,17 @@ declare_mlir_python_extension(TorchMLIRPythonExtensions.Main
 )
 
 ################################################################################
+# Lazy Tensor Core
+################################################################################
+
+if(TORCH_MLIR_ENABLE_LTC)
+  add_subdirectory(torch_mlir/csrc/base_lazy_backend)
+endif()
+# Reference backend has a separate check for TORCH_MLIR_ENABLE_LTC, since it
+# generates a dummy Python library when disabled.
+add_subdirectory(torch_mlir/csrc/reference_lazy_backend)
+
+################################################################################
 # Optionally handle JIT IR importer.
 ################################################################################
 
@@ -56,6 +101,14 @@ if(TORCH_MLIR_ENABLE_JIT_IR_IMPORTER)
   add_subdirectory(torch_mlir/dialects/torch/importer/jit_ir)
   add_subdirectory(torch_mlir_e2e_test)
 endif()
+
+################################################################################
+# Custom op example
+# Required for running the update_torch_ods.sh and update_abstract_interp_lib.sh
+# scripts.
+################################################################################
+
+# add_subdirectory(torch_mlir/_torch_mlir_custom_op_example)
 
 ################################################################################
 # Generate packages and shared library
@@ -72,8 +125,7 @@ set(_source_components
   # tree, which seems excessive.
   MLIRPythonSources
   MLIRPythonExtension.Core
-  MLIRPythonExtension.AllPassesRegistration
-  MLIRPythonExtension.ExecutionEngine
+  MLIRPythonExtension.RegisterEverything
   TorchMLIRPythonSources
   TorchMLIRPythonExtensions
 )
@@ -99,8 +151,15 @@ add_mlir_python_modules(TorchMLIRPythonModules
 # Then it would "just work".
 if(TORCH_MLIR_ENABLE_JIT_IR_IMPORTER)
   add_dependencies(TorchMLIRPythonModules TorchMLIRJITIRImporter)
+  add_dependencies(TorchMLIRPythonModules TorchMLIRJITIRImporterPybind)
   # Build the E2E Tests (which depend on the JIT IR importer now).
   add_dependencies(TorchMLIRPythonModules TorchMLIRE2ETestPythonModules)
+endif()
+
+if(TORCH_MLIR_ENABLE_LTC)
+  # Add Torch-MLIR LTC backend as dependency
+  add_dependencies(TorchMLIRPythonModules torch_mlir_ltc_backend)
+  add_dependencies(TorchMLIRPythonModules reference_lazy_backend)
 endif()
 
 add_subdirectory(test)

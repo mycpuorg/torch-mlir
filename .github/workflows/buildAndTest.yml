@@ -1,104 +1,134 @@
 name: Build and Test
 
 on:
-  push:
-    branches:
-      - main
   pull_request:
+    branches: [ main ]
+  push:
+    branches: [ main ]
   workflow_dispatch:
-    inputs:
-      release_id:
-        description: 'Release id to upload artifacts to'
-        default: ''
 
+# Ensure that only a single job or workflow using the same
+# concurrency group will run at a time. This would cancel
+# any in-progress jobs in the same github workflow and github
+# ref (e.g. refs/heads/main or refs/pull/<pr_number>/merge).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+
+# Provisioned Jobs:
+# ubuntu/docker - x86_64 - llvm in-tree     - pytorch binary - build+test    # most used dev flow and fastest signal
+# ubuntu/docker - x86_64 - llvm out-of-tree - pytorch source - build+test    # most elaborate build
+# macos  - arm64  - llvm in-tree     - pytorch binary - build only    # cross compile, can't test arm64
 jobs:
-  build:
-    name: Build and Test (Release Asserts)
-    runs-on: ubuntu-20.04
+  build-test:
+    strategy:
+      fail-fast: true
+      matrix:
+        os-arch: [ubuntu-x86_64, macos-arm64, windows-x86_64]
+        llvm-build: [in-tree, out-of-tree]
+        torch-binary: [ON, OFF]
+        exclude:
+          # Exclude llvm in-tree and pytorch source
+          - llvm-build: in-tree
+            torch-binary: OFF
+          # Exclude llvm out-of-tree and pytorch binary
+          - llvm-build: out-of-tree
+            torch-binary: ON
+          # Exclude macos-arm64 and llvm out-of-tree altogether
+          - os-arch: macos-arm64
+            llvm-build: out-of-tree
+          - os-arch: windows-x86_64
+            llvm-build: out-of-tree
+        include:
+          # Specify OS versions
+          - os-arch: ubuntu-x86_64
+            os: a100
+          - os-arch: macos-arm64
+            os: macos-latest
+          - os-arch: windows-x86_64
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+
     steps:
-    - name: Set up Python
-      uses: actions/setup-python@v2
-      with:
-        python-version: 3.9
-    - name: Get torch-mlir
-      uses: actions/checkout@v2
+    - name: Checkout torch-mlir
+      uses: actions/checkout@v3
       with:
         submodules: 'true'
-    - name: Install MLIR Python depends
+
+    - name: Fetch PyTorch commit hash
+      if: ${{ matrix.os-arch != 'windows-x86_64' }}
       run: |
-        python -m pip install -r $GITHUB_WORKSPACE/external/llvm-project/mlir/python/requirements.txt
-    - name: Install PyTorch nightly depends
-      run: |
-        python -m pip install --pre torch torchvision -f https://download.pytorch.org/whl/nightly/cpu/torch_nightly.html
-    - name: Install Ninja
-      uses: llvm/actions/install-ninja@55d844821959226fab4911f96f37071c1d4c3268
-    - name: Get Submodule Hash
-      id: get-submodule-hash
-      run: echo "::set-output name=hash::$(md5sum $(git submodule status))"
-      shell: bash
-    - name: Ccache for C++ compilation
-      uses: hendrikmuhs/ccache-action@4687d037e4d7cf725512d9b819137a3af34d39b3
+        PT_HASH="$(cat ${GITHUB_WORKSPACE}/pytorch-hash.txt)"
+        echo "PT_HASH=${PT_HASH}" >> ${GITHUB_ENV}
+
+    - name: Setup ccache
+      uses: ./.github/actions/setup-build
       with:
-        key: ${{ runner.os }}-clangreleaseasserts-${{ steps.get-submodule-hash.outputs.hash }}
-    - name: Build and Test torch-mlir (Assert)
+        cache-suffix: 'build-${{ matrix.llvm-build }}'
+
+    - name: Set up Visual Studio shell
+      if: ${{ matrix.os-arch == 'windows-x86_64' }}
+      uses: egor-tensin/vs-shell@v2
+      with:
+        arch: x64
+
+    - name: Cache PyTorch Build
+      if: matrix.os-arch != 'windows-x86_64'
+      id: cache-pytorch
+      uses: ashay/cache@v1
+      with:
+        path: ${{ github.workspace }}/build_tools/python_deploy/wheelhouse
+        key: ${{ runner.os }}-pytorch-${{ env.PT_HASH }}
+        save: ${{ github.ref_name == 'main' && matrix.torch-binary == 'OFF' }}
+
+    - name: Build and Test os-arch='ubuntu-x86_64' llvm-build='${{ matrix.llvm-build }}' torch-binary='${{ matrix.torch-binary }}'
+      if: ${{ matrix.os-arch == 'ubuntu-x86_64' }}
       run: |
         cd $GITHUB_WORKSPACE
-        mkdir build
-        cd build
-        cmake $GITHUB_WORKSPACE/external/llvm-project/llvm -GNinja \
+        TORCH_MLIR_SRC_PYTORCH_BRANCH="$(cat pytorch-hash.txt)" \
+        TM_PACKAGES="${{ matrix.llvm-build }}" \
+        TM_USE_PYTORCH_BINARY="${{ matrix.torch-binary }}" \
+        TM_PYTORCH_INSTALL_WITHOUT_REBUILD="${{ steps.cache-pytorch.outputs.cache-hit }}" \
+        ./build_tools/python_deploy/build_linux_packages.sh
+    - name: Configure os-arch='macos-arm64' llvm-build='in-tree' torch-binary='${{ matrix.torch-binary }}'
+      # cross compile, can't test arm64
+      if: ${{ matrix.os-arch == 'macos-arm64' && matrix.llvm-build == 'in-tree' }}
+      run: |
+        # TODO: Reenable LTC after build on macOS-arm64 is fixed (https://github.com/llvm/torch-mlir/issues/1253)
+        cmake -GNinja -Bbuild_arm64 \
           -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_C_COMPILER=clang \
+          -DCMAKE_CXX_COMPILER=clang++ \
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
           -DCMAKE_LINKER=lld \
-          -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-          -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
-          -DPython3_EXECUTABLE=$(which python) \
+          -DCMAKE_OSX_ARCHITECTURES=arm64 \
           -DLLVM_ENABLE_ASSERTIONS=ON \
           -DLLVM_ENABLE_PROJECTS=mlir \
           -DLLVM_EXTERNAL_PROJECTS="torch-mlir;torch-mlir-dialects" \
           -DLLVM_EXTERNAL_TORCH_MLIR_SOURCE_DIR="$GITHUB_WORKSPACE" \
-          -DLLVM_EXTERNAL_TORCH_MLIR_DIALECTS_SOURCE_DIR="${GITHUB_WORKSPACE}/external/llvm-external-projects/torch-mlir-dialects" \
+          -DLLVM_EXTERNAL_TORCH_MLIR_DIALECTS_SOURCE_DIR="${GITHUB_WORKSPACE}/externals/llvm-external-projects/torch-mlir-dialects" \
+          -DLLVM_TARGETS_TO_BUILD=AArch64 \
+          -DLLVM_USE_HOST_TOOLS=ON \
+          -DLLVM_ENABLE_ZSTD=OFF \
           -DMLIR_ENABLE_BINDINGS_PYTHON=ON \
-          -DLLVM_TARGETS_TO_BUILD=host
-        ninja check-torch-mlir-all
-    - name: RefBackend - TorchScript end-to-end tests
+          -DTORCH_MLIR_ENABLE_MHLO=OFF \
+          -DTORCH_MLIR_ENABLE_LTC=OFF \
+          -DTORCH_MLIR_USE_INSTALLED_PYTORCH="${{ matrix.torch-binary }}" \
+          -DMACOSX_DEPLOYMENT_TARGET=12.0 \
+          -DPython3_EXECUTABLE="$(which python)" \
+          $GITHUB_WORKSPACE/externals/llvm-project/llvm
+    - name: Build torch-mlir (cross-compile)
+      if: ${{ matrix.os-arch == 'macos-arm64' }}
       run: |
-        cd $GITHUB_WORKSPACE
-        export PYTHONPATH="$GITHUB_WORKSPACE/build/tools/torch-mlir/python_packages/torch_mlir"
-        python -m e2e_testing.torchscript.main --config=refbackend -v
-    - name: TOSA backend - TorchScript end-to-end tests
-      run: |
-        cd $GITHUB_WORKSPACE
-        export PYTHONPATH="$GITHUB_WORKSPACE/build/tools/torch-mlir/python_packages/torch_mlir"
-        python -m e2e_testing.torchscript.main --config=tosa -v
+        cmake --build build_arm64
 
-    # TODO: Only build packages in full Release mode.
-    # On the other hand, having assertions on isn't too bad of an idea at this
-    # early stage.
-    - name: Build Python wheels and smoke test.
-      run: |
-        cd $GITHUB_WORKSPACE
-        python -m pip install wheel
-        TORCH_MLIR_CMAKE_BUILD_DIR="$GITHUB_WORKSPACE/build" \
-          TORCH_MLIR_CMAKE_BUILD_DIR_ALREADY_BUILT=1 \
-          ./build_tools/build_python_wheels.sh
+    - name: Build (Windows)
+      if: ${{ matrix.os-arch == 'windows-x86_64' }}
+      shell: bash
+      run: ./build_tools/python_deploy/build_windows_ci.sh
 
-    # If we were given a release_id, then upload the package we just built
-    # to the github releases page.
-    - name: Upload Release Assets (if requested)
-      if: github.event.inputs.release_id != ''
-      id: upload-release-assets
-      uses: dwenegar/upload-release-assets@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.WORKFLOW_INVOCATION_TOKEN }}
-      with:
-        release_id: ${{ github.event.inputs.release_id }}
-        assets_path: ./wheelhouse/*.whl
-    # Publishing is necessary to make the release visible to `pip`
-    # on the github releases page.
-    - name: Publish Release (if requested)
-      if: github.event.inputs.release_id != ''
-      id: publish_release
-      uses: eregon/publish-release@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.WORKFLOW_INVOCATION_TOKEN }}
-      with:
-        release_id: ${{ github.event.inputs.release_id }}
+    - name: Print ccache configuration and statistics
+      shell: bash
+      run: ccache --show-config --show-stats --print-stats

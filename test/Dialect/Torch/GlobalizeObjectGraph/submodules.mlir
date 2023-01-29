@@ -2,10 +2,13 @@
 
 // Check that linkage names consist of the dotted path from the root. 
 
-// CHECK-LABEL:   torch.global_slot @m.float : !torch.float  {
-// CHECK:           %[[INIT:.*]] = torch.constant.float 4.200000e+01
-// CHECK:           torch.global_slot.init %[[INIT]] : !torch.float
+// CHECK-LABEL:   torch.global_slot.module_initializer {
+// CHECK:           %[[FLOAT:.*]] = torch.constant.float 4.200000e+01
+// CHECK:           torch.initialize.global_slots [
+// CHECK:             @m.float(%[[FLOAT]] : !torch.float)
+// CHECK:           ]
 // CHECK:         }
+// CHECK-LABEL:   torch.global_slot @m.float : !torch.float
 
 
 torch.class_type @child {
@@ -22,3 +25,8 @@ torch.class_type @parent {
 %parent = torch.nn_module {
   torch.slot "m", %child : !torch.nn.Module<"child">
 } : !torch.nn.Module<"parent">
+
+func.func private @ensure_all_slots_are_used(%arg0: !torch.nn.Module<"child">) {
+  %0 = torch.prim.GetAttr %arg0["float"] : !torch.nn.Module<"child"> -> !torch.float
+  return
+}

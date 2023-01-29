@@ -1,7 +1,7 @@
 // RUN: torch-mlir-opt -torch-verify-linalg-on-tensors-backend-contract -split-input-file -verify-diagnostics -allow-unregistered-dialect %s | FileCheck %s
 
-// CHECK: func @mm
-func @mm(%arg0: tensor<?x?xf32>, %arg1: tensor<?x?xf32>) -> tensor<?x?xf32> {
+// CHECK: func.func @mm
+func.func @mm(%arg0: tensor<?x?xf32>, %arg1: tensor<?x?xf32>) -> tensor<?x?xf32> {
   %c0 = arith.constant 0 : index
   %c1 = arith.constant 1 : index
   %cst = arith.constant 0.000000e+00 : f32
@@ -11,8 +11,8 @@ func @mm(%arg0: tensor<?x?xf32>, %arg1: tensor<?x?xf32>) -> tensor<?x?xf32> {
   %3 = tensor.dim %arg1, %c1 : tensor<?x?xf32>
   %4 = arith.cmpi eq, %1, %2 : index
   cf.assert %4, "mismatching contracting dimension for aten.mm"
-  %5 = linalg.init_tensor [%0, %3] : tensor<?x?xf32>
-  %6 = linalg.fill(%cst, %5) : f32, tensor<?x?xf32> -> tensor<?x?xf32>
+  %5 = tensor.empty(%0, %3) : tensor<?x?xf32>
+  %6 = linalg.fill ins(%cst : f32) outs(%5 : tensor<?x?xf32>) -> tensor<?x?xf32>
   %7 = linalg.matmul ins(%arg0, %arg1 : tensor<?x?xf32>, tensor<?x?xf32>) outs(%6 : tensor<?x?xf32>) -> tensor<?x?xf32>
   return %7 : tensor<?x?xf32>
 }
@@ -23,7 +23,7 @@ func @mm(%arg0: tensor<?x?xf32>, %arg1: tensor<?x?xf32>) -> tensor<?x?xf32> {
 
 // expected-error@+1 {{Module does not conform to the linalg-on-tensors backend contract.}}
 module {
-  func @disallowed() {
+  func.func @disallowed() {
     // expected-error@+1 {{failed to legalize operation 'unknown_dialect.unknown_op'}}
     "unknown_dialect.unknown_op"() : () -> ()
     return
@@ -46,8 +46,8 @@ module {
 
 // expected-error@+1 {{Module does not conform to the linalg-on-tensors backend contract.}}
 module {
-  func @disallowed(%arg0: !torch.tensor) -> !torch.tensor {
-    // expected-error@+1 {{failed to legalize operation 'std.return'}}
+  func.func @disallowed(%arg0: !torch.tensor) -> !torch.tensor {
+    // expected-error@+1 {{failed to legalize operation 'func.return'}}
     return %arg0 : !torch.tensor
   }
 }

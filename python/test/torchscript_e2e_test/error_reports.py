@@ -9,10 +9,10 @@ from typing import List, Tuple, Dict
 
 import torch
 
-from torch_mlir_e2e_test.torchscript.framework import run_tests, TestUtils
-from torch_mlir_e2e_test.torchscript.reporting import report_results
-from torch_mlir_e2e_test.torchscript.registry import register_test_case, GLOBAL_TEST_REGISTRY
-from torch_mlir_e2e_test.torchscript.configs import TorchScriptTestConfig
+from torch_mlir_e2e_test.framework import run_tests, TestUtils
+from torch_mlir_e2e_test.reporting import report_results
+from torch_mlir_e2e_test.registry import register_test_case, GLOBAL_TEST_REGISTRY
+from torch_mlir_e2e_test.configs import TorchScriptTestConfig
 
 # CHECK: Unexpected outcome summary:
 # CHECK: FAIL - "ErroneousModule_basic"
@@ -118,7 +118,7 @@ class ErroneousModule(torch.nn.Module):
 
     # CHECK-NEXT: @ trace item #8 - call to "test_tensor_value_mismatch"
     # CHECK-NEXT: @ output of call to "test_tensor_value_mismatch"
-    # CHECK-NEXT: ERROR: value (Tensor with shape=[3] min=+1.0, max=+3.0, mean=+2.0) is not close to golden value (Tensor with shape=[3] min=+1.5, max=+3.5, mean=+2.5)
+    # CHECK-NEXT: ERROR: value (Tensor with shape=[3], dtype=torch.float32, min=+1.0, max=+3.0, mean=+2.0) is not close to golden value (Tensor with shape=[3], dtype=torch.float32, min=+1.5, max=+3.5, mean=+2.5)
     @torch.jit.export
     def test_tensor_value_mismatch(self):
         if torch.jit.is_scripting():

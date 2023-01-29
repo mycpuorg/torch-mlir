@@ -32,9 +32,9 @@ Value buildRescale(PatternRewriter &rewriter, Operation *op,
       rewriter, op->getLoc(), output_type, input_val,
       rewriter.getI32IntegerAttr(static_cast<int32_t>(input_zp)),
       rewriter.getI32IntegerAttr(static_cast<int32_t>(output_zp)),
-      rewriter.getI32ArrayAttr({multiplier}), rewriter.getI32ArrayAttr({shift}),
-      rewriter.getBoolAttr(scale32), rewriter.getBoolAttr(double_round),
-      rewriter.getBoolAttr(false));
+      rewriter.getDenseI32ArrayAttr({multiplier}),
+      rewriter.getDenseI32ArrayAttr({shift}), rewriter.getBoolAttr(scale32),
+      rewriter.getBoolAttr(double_round), rewriter.getBoolAttr(false));
 
   return rescale_op.getResult();
 }
@@ -85,8 +85,8 @@ Value buildRescaleOpConvOutput(PatternRewriter &rewriter, Operation *op,
     auto rescale_op = CreateOpAndInfer<tosa::RescaleOp>(
         rewriter, op->getLoc(), output_type, conv_val,
         rewriter.getI32IntegerAttr(0), rewriter.getI32IntegerAttr(output_zp),
-        rewriter.getI32ArrayAttr({multiplier}),
-        rewriter.getI32ArrayAttr({shift}), rewriter.getBoolAttr(scale32),
+        rewriter.getDenseI32ArrayAttr({multiplier}),
+        rewriter.getDenseI32ArrayAttr({shift}), rewriter.getBoolAttr(scale32),
         rewriter.getBoolAttr(true), rewriter.getBoolAttr(false));
 
     return rescale_op.getResult();
@@ -121,8 +121,8 @@ Value buildRescaleOpConvOutput(PatternRewriter &rewriter, Operation *op,
     auto rescale_op = CreateOpAndInfer<tosa::RescaleOp>(
         rewriter, op->getLoc(), output_type, conv_val,
         rewriter.getI32IntegerAttr(0), rewriter.getI32IntegerAttr(output_zp),
-        rewriter.getI32ArrayAttr(multiplier_arr),
-        rewriter.getI32ArrayAttr(shift_arr), rewriter.getBoolAttr(scale32),
+        rewriter.getDenseI32ArrayAttr(multiplier_arr),
+        rewriter.getDenseI32ArrayAttr(shift_arr), rewriter.getBoolAttr(scale32),
         rewriter.getBoolAttr(true), rewriter.getBoolAttr(true));
 
     return rescale_op.getResult();
@@ -153,8 +153,8 @@ Value getTosaConstTensorSingleF32(PatternRewriter &rewriter, Operation *op,
 // T: storage C type.
 // Default template creates a constant tensor in T.
 template <typename T>
-llvm::Optional<Value> getConstTensor(PatternRewriter &rewriter, Operation *op,
-                                     ArrayRef<T> vec, ArrayRef<int64_t> shape) {
+std::optional<Value> getConstTensor(PatternRewriter &rewriter, Operation *op,
+                                    ArrayRef<T> vec, ArrayRef<int64_t> shape) {
   uint64_t num_total_elements = 1;
   for (int64_t a : shape) {
     num_total_elements *= a;
@@ -162,7 +162,7 @@ llvm::Optional<Value> getConstTensor(PatternRewriter &rewriter, Operation *op,
 
   if (vec.size() != num_total_elements) {
     op->emitOpError("getConstTensor(): number of elements mismatch.");
-    return llvm::None;
+    return std::nullopt;
   }
 
   auto const_type =
@@ -176,9 +176,9 @@ llvm::Optional<Value> getConstTensor(PatternRewriter &rewriter, Operation *op,
 
 // Template specialization for APInt
 template <>
-llvm::Optional<Value> getConstTensor<APInt>(PatternRewriter &rewriter,
-                                            Operation *op, ArrayRef<APInt> vec,
-                                            ArrayRef<int64_t> shape) {
+std::optional<Value> getConstTensor<APInt>(PatternRewriter &rewriter,
+                                           Operation *op, ArrayRef<APInt> vec,
+                                           ArrayRef<int64_t> shape) {
   uint64_t num_total_elements = 1;
   for (int64_t a : shape) {
     num_total_elements *= a;
@@ -186,7 +186,7 @@ llvm::Optional<Value> getConstTensor<APInt>(PatternRewriter &rewriter,
 
   if (vec.size() != num_total_elements) {
     op->emitOpError("getConstTensor(): number of elements mismatch.");
-    return llvm::None;
+    return std::nullopt;
   }
 
   auto const_type = RankedTensorType::get(
@@ -200,9 +200,9 @@ llvm::Optional<Value> getConstTensor<APInt>(PatternRewriter &rewriter,
 
 // Template specialization for float
 template <>
-llvm::Optional<Value> getConstTensor<float>(PatternRewriter &rewriter,
-                                            Operation *op, ArrayRef<float> vec,
-                                            ArrayRef<int64_t> shape) {
+std::optional<Value> getConstTensor<float>(PatternRewriter &rewriter,
+                                           Operation *op, ArrayRef<float> vec,
+                                           ArrayRef<int64_t> shape) {
   uint64_t num_total_elements = 1;
   for (int64_t a : shape) {
     num_total_elements *= a;
@@ -210,7 +210,7 @@ llvm::Optional<Value> getConstTensor<float>(PatternRewriter &rewriter,
 
   if (vec.size() != num_total_elements) {
     op->emitOpError("getConstTensor(): number of elements mismatch.");
-    return llvm::None;
+    return std::nullopt;
   }
 
   auto const_type = RankedTensorType::get(shape, rewriter.getF32Type());
@@ -221,15 +221,90 @@ llvm::Optional<Value> getConstTensor<float>(PatternRewriter &rewriter,
   return const_op.getResult();
 }
 
-// Template instantiation
-template llvm::Optional<Value> getConstTensor<int32_t>(PatternRewriter &,
-                                                       Operation *,
-                                                       ArrayRef<int32_t> vec,
-                                                       ArrayRef<int64_t> shape);
+static LogicalResult checkValidityOfCast(Type src, Type dest) {
+  if ((src == dest) || (src.isInteger(64) && dest.isInteger(32)) ||
+      (src.isInteger(64) && dest.isInteger(8)) ||
+      (src.isInteger(64) && dest.isInteger(1)) ||
+      (src.isInteger(64) && dest.isF32()) ||
+      (src.isInteger(32) && dest.isInteger(64)) ||
+      (src.isInteger(32) && dest.isInteger(1)) ||
+      (src.isInteger(32) && dest.isF32()) ||
+      (src.isInteger(8) && dest.isInteger(1)) ||
+      (src.isInteger(1) && dest.isInteger(64)) ||
+      (src.isF32() && dest.isInteger(8)) ||
+      (src.isF32() && dest.isInteger(1))) {
+    return success();
+  }
+  return failure();
+}
 
-template llvm::Optional<Value> getConstTensor<int64_t>(PatternRewriter &,
-                                                       Operation *,
-                                                       ArrayRef<int64_t> vec,
-                                                       ArrayRef<int64_t> shape);
+// Template specialization for float
+LogicalResult tosaCastTensorToType(PatternRewriter &rewriter, Operation *op,
+                                   Value src, Type destType, Value &result) {
+
+  Type srcElemTy = src.getType().dyn_cast<TensorType>().getElementType();
+  Type destElemTy = destType.dyn_cast<TensorType>().getElementType();
+
+  if (failed(checkValidityOfCast(srcElemTy, destElemTy)))
+    return rewriter.notifyMatchFailure(
+        op, "casting to result dtype is invalid or unsupported");
+
+  if (destElemTy.isInteger(1)) {
+    auto srcType = src.getType().dyn_cast<TensorType>();
+    SmallVector<int64_t> srcShape(srcType.getShape());
+    uint64_t num_total_elements = 1;
+    for (int64_t a : srcShape)
+      num_total_elements *= a;
+
+    std::optional<Value> constOp;
+    if (srcElemTy.isInteger(64)) {
+      SmallVector<int64_t> values(num_total_elements, 0);
+      constOp =
+          tosa::getConstTensor<int64_t>(rewriter, op, values, srcShape).value();
+    } else if (srcElemTy.isInteger(32)) {
+      SmallVector<int32_t> values(num_total_elements, 0);
+      constOp =
+          tosa::getConstTensor<int32_t>(rewriter, op, values, srcShape).value();
+    } else if (srcElemTy.isF32()) {
+      SmallVector<float> values(num_total_elements, 0.0);
+      constOp =
+          tosa::getConstTensor<float>(rewriter, op, values, srcShape).value();
+    } else if (srcElemTy.isInteger(8)) {
+      SmallVector<int8_t> values(num_total_elements, 0);
+      constOp =
+          tosa::getConstTensor<int8_t>(rewriter, op, values, srcShape).value();
+    }
+    Value equalToZero = rewriter.create<tosa::EqualOp>(op->getLoc(), destType,
+                                                       src, constOp.value());
+    result = rewriter.create<tosa::LogicalNotOp>(op->getLoc(), destType,
+                                                 equalToZero);
+  } else {
+    result = rewriter.create<tosa::CastOp>(op->getLoc(), destType, src);
+  }
+  return success();
+}
+
+Value promoteType(PatternRewriter &rewriter, Value input, TensorType outType) {
+  Operation *op = input.getDefiningOp();
+  TensorType inType = input.getType().cast<TensorType>();
+
+  if (inType.getElementType() != outType.getElementType()) {
+    TensorType promotedType =
+        inType.cloneWith(inType.getShape(), outType.getElementType());
+    return rewriter.create<tosa::CastOp>(op->getLoc(), promotedType, input);
+  }
+  return input;
+}
+
+// Template instantiation
+template std::optional<Value> getConstTensor<int32_t>(PatternRewriter &,
+                                                      Operation *,
+                                                      ArrayRef<int32_t> vec,
+                                                      ArrayRef<int64_t> shape);
+
+template std::optional<Value> getConstTensor<int64_t>(PatternRewriter &,
+                                                      Operation *,
+                                                      ArrayRef<int64_t> vec,
+                                                      ArrayRef<int64_t> shape);
 } // namespace tosa
 } // namespace mlir

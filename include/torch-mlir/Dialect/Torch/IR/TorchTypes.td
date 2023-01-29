@@ -10,6 +10,8 @@
 #ifndef TORCH_TYPES
 #define TORCH_TYPES
 
+include "mlir/IR/AttrTypeBase.td"
+include "mlir/IR/DialectBase.td"
 include "torch-mlir/Dialect/Torch/IR/TorchBase.td"
 
 //===----------------------------------------------------------------------===//
@@ -24,21 +26,8 @@ class Torch_Type<string name, string typeMnemonic,
 
 class Torch_TypeWithContainedType<string name, string typeMnemonic> : Torch_Type<name, typeMnemonic> {
   let parameters = (ins "::mlir::Type":$containedType);
+  let hasCustomAssemblyFormat = 1;
 
-  let printer = [{
-    $_printer << "<" << getImpl()->containedType << ">";
-  }];
-
-  let parser = [{
-    if ($_parser.parseLess())
-      return Type();
-    Type containedType;
-    if ($_parser.parseType(containedType))
-      return Type();
-    if ($_parser.parseGreater())
-      return Type();
-    return get($_ctxt, containedType);
-  }];
   let builders = [
     TypeBuilderWithInferredContext<(ins "::mlir::Type":$containedType), [{
       return Base::get(containedType.getContext(), containedType);
@@ -52,32 +41,16 @@ def Torch_NnModuleType : Torch_Type<"NnModule", "nn.Module"> {
     Represents an instance of a `torch.nn.Module` with the given `className`.
   }];
   let parameters = (ins StringRefParameter<"class name">:$className);
-
-  let printer = [{
-    $_printer << "<\"";
-    llvm::printEscapedString(getImpl()->className, $_printer.getStream());
-    $_printer << "\">";
-  }];
-
-  let parser = [{
-    if ($_parser.parseLess())
-      return Type();
-   std::string className;
-    if ($_parser.parseOptionalString(&className))
-      return Type();
-    if ($_parser.parseGreater())
-      return Type();
-    return get($_ctxt, className);
-  }];
+  let hasCustomAssemblyFormat = 1;
 }
 
 // For standard ArrayRefs, which require allocation.
-class OptionalArrayRefParameter<string arrayOf, string desc = ""> :
+class OptionalArrayRefTorchParameter<string arrayOf, string desc = ""> :
     AttrOrTypeParameter<
-      "::llvm::Optional<::llvm::ArrayRef<" # arrayOf # ">>", desc> {
+      "::std::optional<::llvm::ArrayRef<" # arrayOf # ">>", desc> {
   let allocator = [{
-    if ($_self.hasValue()) {
-      $_dst.getValue() = $_allocator.copyInto($_self.getValue());
+    if ($_self.has_value()) {
+      $_dst.value() = $_allocator.copyInto($_self.value());
     }
   }];
 }
@@ -105,11 +78,8 @@ class AnyTorchTensorType<string name, string typeMnemonic>
     If the type is `!torch.vtensor` then the tensor is restricted to operations
     that have value semantics ("v" = "value semantics"). This helps to maintain
     a strict separation between the value-semantic and potentially-mutating
-    worlds, as one of our main jobs in the compiler is to isolate the mutating
-    parts as much as possible because most lower levels of the compiler stack
-    are expected to require value semantics. E.g. many backend contracts
-    mostly use linalg-on-tensor for compute-heavy ops, which require
-    a conversion to the builtin `tensor` type which has value semantics.
+    worlds, as one of our main jobs in Torch-MLIR is to normalize the program
+    into a form with value semantics.
     Some notes about value semantics:
       - Using the type system described in PEP 483 (which TorchScript and other
         Python systems follow), `!torch.tensor` is a subtype of
@@ -157,6 +127,8 @@ class AnyTorchTensorType<string name, string typeMnemonic>
     | torch.int64       | si64               |
     | torch.bool        | i1                 |
     | torch.qint8       | !torch.qint8       |
+    | torch.quint8      | !torch.quint8      |
+    | torch.complex*    | complex<*>         |
     |-------------------|--------------------|
     ```
 
@@ -175,10 +147,11 @@ class AnyTorchTensorType<string name, string typeMnemonic>
     - `getElementType()` -> `getDtype()` (but be sure that `hasDtype()` though).
   }];
   let parameters = (ins
-    OptionalArrayRefParameter<"int64_t", "sizes of dimensions">:$optionalSizes,
+    OptionalArrayRefTorchParameter<"int64_t", "sizes of dimensions">:$optionalSizes,
     "::mlir::Type":$optionalDtype
   );
   let genVerifyDecl = 1;
+  let hasCustomAssemblyFormat = 1;
   string extraBaseClassDeclaration = [{
   }];
 }
@@ -236,6 +209,26 @@ def Torch_TupleType : Torch_Type<"Tuple", "tuple"> {
   let parameters = (ins
     ArrayRefParameter<"::mlir::Type", "contained types">:$containedTypes
   );
+  let hasCustomAssemblyFormat = 1;
+}
+
+def Torch_UnionType : Torch_Type<"Union", "union"> {
+  let summary = "!torch.union<T1, T2, T3>";
+  let description = [{
+    Union type with 0-N alternative types.
+
+    NOTE: We use the terminology "contained types" for consistency with
+    PyTorch. Strictly speaking, the types aren't "contained" though.
+
+    TODO: Canonicalize unions based on subtype relations, to allow
+    using pointer equality to compare two unions for being the same.
+    For now, `!torch.union<T1, T2>` is different from `!torch.union<T2, T1>`,
+    and same for `!torch.union<T1, SubtypeOfT1>` vs `!torch.union<T1>`.
+  }];
+  let parameters = (ins
+    ArrayRefParameter<"::mlir::Type", "contained types">:$containedTypes
+  );
+  let hasCustomAssemblyFormat = 1;
 }
 
 def Torch_DeviceType : Torch_Type<"Device", "Device"> {
@@ -243,7 +236,7 @@ def Torch_DeviceType : Torch_Type<"Device", "Device"> {
 }
 
 def Torch_GeneratorType : Torch_Type<"Generator", "Generator"> {
-  let summary = "Torch Generator for producing pseudo-random numbers";
+  let summary = "Torch Generator for producing valsem-random numbers";
 }
 
 def Torch_BoolType : Torch_Type<"Bool", "bool"> {
@@ -301,6 +294,17 @@ def Torch_QInt8Type : Torch_Type<"QInt8", "qint8"> {
   }];
 }
 
+def Torch_QUInt8Type : Torch_Type<"QUInt8", "quint8"> {
+  let summary = "Type modeling `ScalarType::QUInt8`";
+  let description = [{
+    This is intended to be a 1:1 match for the Torch `ScalarType` types.
+
+    Looking at the variety / ad-hocness (e.g. `QUInt4x2`) of that set of
+    types, it is deemed preferable to import them as one-off ad-hoc types
+    instead of a single parameterized type.
+  }];
+}
+
 def Torch_LinearParamsType : Torch_Type<"LinearParams", "LinearParams"> {
   let summary = "Torch packed linear params type";
   let description = [{
@@ -342,26 +346,8 @@ def Torch_DictType : Torch_Type<"Dict", "dict"> {
   let description = [{
     Torch Dict type with key and value type.
   }];
-
-  let printer = [{
-    $_printer << "<" << getImpl()->keyType << ", " << getImpl()->valueType << ">";
-  }];
-
-  let parser = [{
-    if ($_parser.parseLess())
-      return Type();
-    Type keyType;
-    if ($_parser.parseType(keyType))
-      return Type();
-    if ($_parser.parseComma())
-      return Type();
-    Type valueType;
-    if ($_parser.parseType(valueType))
-      return Type();
-    if ($_parser.parseGreater())
-      return Type();
-    return get($_ctxt, keyType, valueType);
-  }];
+  let hasCustomAssemblyFormat = 1;
+  let genVerifyDecl = 1;
   let builders = [
     TypeBuilderWithInferredContext<(ins "::mlir::Type":$keyType,
                                         "::mlir::Type":$valueType), [{
@@ -379,14 +365,15 @@ class OptionalOf<Type type, string descr> :
 
 def AnyTorchOptionalTensorType :
       OptionalOf<AnyTorchTensorType, "Optional torch tensor type">;
-def TorchOptionalIntType: OptionalOf<Torch_IntType, "Optional torch int type">;
-def TorchOptionalBoolType:
+def AnyTorchOptionalIntType: OptionalOf<Torch_IntType, "Optional torch int type">;
+def AnyTorchOptionalFloatType: OptionalOf<Torch_FloatType, "Optional torch float type">;
+def AnyTorchOptionalBoolType:
       OptionalOf<Torch_BoolType, "Optional torch bool type">;
-def TorchOptionalStringType:
+def AnyTorchOptionalStringType:
       OptionalOf<Torch_StringType, "Optional torch Str type">;
-def TorchOptionalDeviceType:
+def AnyTorchOptionalDeviceType:
       OptionalOf<Torch_DeviceType, "Optional torch device type">;
-def TorchOptionalGeneratorType:
+def AnyTorchOptionalGeneratorType:
       OptionalOf<Torch_GeneratorType, "Optional torch Generator type">;
 
 def IsListTypePred : CPred<"$_self.isa<::mlir::torch::Torch::ListType>()">;
@@ -396,21 +383,24 @@ class ListOf<list<Type> allowedTypes, string descr> :
             "$_self.cast<::mlir::torch::Torch::ListType>().getContainedType()",
             descr, "::mlir::torch::Torch::ListType">;
 
-def TorchBoolListType : ListOf<[Torch_BoolType], "Bool list type (bool[])">;
-def TorchIntListType : ListOf<[Torch_IntType], "Int list type (int[])">;
-def TorchStringListType : ListOf<[Torch_StringType], "Str list type (str[])">;
-def AnyTorchTensorListType:
+def AnyTorchListOfTorchBoolType : ListOf<[Torch_BoolType], "Bool list type (bool[])">;
+def AnyTorchListOfTorchIntType : ListOf<[Torch_IntType], "Int list type (int[])">;
+def AnyTorchListOfTorchFloatType : ListOf<[Torch_FloatType], "Float list type (float[])">;
+def AnyTorchListOfTorchStringType : ListOf<[Torch_StringType], "Str list type (str[])">;
+def AnyTorchListOfTensorType:
       ListOf<[AnyTorchTensorType], "Any int list type (Tensor[])">;
-def AnyTorchOptionalTensorListType :
+def AnyTorchListOfOptionalTensorType :
       ListOf<[AnyTorchOptionalTensorType],
              "Any optional tensor list type (Tensor?[])">;
-
+def AnyTorchListOfOptionalIntType :
+      ListOf<[AnyTorchOptionalIntType],
+             "List of optional ints type (int?[])">;
+def AnyTorchOptionalListOfTorchIntType : OptionalOf<AnyTorchListOfTorchIntType, "Optional torch int list type (int[]?)">;
+def AnyTorchOptionalListOfTorchFloatType : OptionalOf<AnyTorchListOfTorchFloatType, "Optional torch float list type (float[]?)">;
 // Note: TorchScript does not consider !torch.bool to be a Scalar.
-def AnyTorchScalarType : AnyTypeOf<[
-  Torch_IntType,
-  Torch_FloatType,
-  Torch_NumberType,
-], "Any Python numeric type compatible with being the scalar type of a tensor (`Scalar`)">;
+def AnyTorchScalarType :
+    Type<CPred<"isValidSubtype($_self, ::mlir::torch::Torch::NumberType::get($_self.getContext()))">,
+         "Any Python numeric type compatible with being the scalar type of a tensor">;
 def AnyTorchOptionalScalarType:
       OptionalOf<AnyTorchScalarType, "Optional torch scalar type">;
 
@@ -422,7 +412,6 @@ def AnyTorchDictKeyType : AnyTypeOf<[
   Torch_BoolType,
   Torch_FloatType,
   Torch_StringType,
-  Torch_FloatType,
   AnyTorchTensorType,
 ], "Allowed dict key types">;
 
@@ -443,6 +432,7 @@ def AnyTorchType : AnyTypeOf<[
   Torch_OptionalType,
   Torch_StringType,
   Torch_TupleType,
+  Torch_UnionType,
 ], "Any type that is legal to pass to a Torch kernel">;
 
 def AnyTorchListType : ListOf<[AnyType], "Any Torch list Type">;

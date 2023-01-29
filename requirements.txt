@@ -1,10 +1,6 @@
--f https://download.pytorch.org/whl/nightly/cpu/torch_nightly.html
---pre
+-r build-requirements.txt
 
-numpy
-torch
-torchvision
-
-# Build requirements.
-pybind11
-wheel
+# Test Requirements
+pillow
+dill
+multiprocess

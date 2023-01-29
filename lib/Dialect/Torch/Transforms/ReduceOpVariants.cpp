@@ -36,12 +36,28 @@ static void createOverwriteTensorContents(PatternRewriter &rewriter,
                                              overwrittenTensor);
 }
 
+static Type getContainerOrTensorTypeWithValueSemantics(Type type) {
+  if (auto optionalType = type.dyn_cast<OptionalType>()) {
+    Type newContainedType = getContainerOrTensorTypeWithValueSemantics(
+        optionalType.getContainedType());
+    return OptionalType::get(newContainedType);
+  } else if (auto listType = type.dyn_cast<ListType>()) {
+    Type newContainedType =
+        getContainerOrTensorTypeWithValueSemantics(listType.getContainedType());
+    return ListType::get(newContainedType);
+  } else if (auto tensorType = type.dyn_cast<NonValueTensorType>()) {
+    return tensorType.getWithValueSemantics();
+  } else {
+    return nullptr;
+  }
+}
+
 namespace {
 // Convert value semantic ops operating on mutable arrays to instead operate on
 // immutable tensors.
-class ConvertToImmutableTensors : public RewritePattern {
+class ConvertHasValueSemanticsOpsToValueTensors : public RewritePattern {
 public:
-  ConvertToImmutableTensors(MLIRContext *context)
+  ConvertHasValueSemanticsOpsToValueTensors(MLIRContext *context)
       : RewritePattern(MatchAnyOpTypeTag(), /*benefit=*/1, context) {}
   LogicalResult matchAndRewrite(Operation *op,
                                 PatternRewriter &rewriter) const override {
@@ -72,27 +88,39 @@ public:
                   "from list construct");
         }
 
-        if (listConstruct.elements().empty())
+        if (listConstruct.getElements().empty())
           continue;
 
         // TODO: Handle optional type in list type.
-        if (listType.getContainedType().isa<OptionalType>()) {
-          if (!llvm::all_of(listConstruct.elements(), [](Value val) {
-                return val.getType().isa<NonValueTensorType>();
-              }))
+        if (auto optionalType =
+                listType.getContainedType().dyn_cast<OptionalType>()) {
+          if (!llvm::all_of(listConstruct.getElements(), [](Value val) {
+                return val.getType().isa<NonValueTensorType, Torch::NoneType>();
+              })) {
+            rewriter.cancelRootUpdate(op);
             return rewriter.notifyMatchFailure(
                 op, "unimplemented: list containing optional type is not "
                     "handled.");
+          }
         }
 
-        auto newListElements = llvm::to_vector<4>(llvm::map_range(
-            listConstruct.elements(), [&](Value tensor) -> Value {
-              return rewriter.create<CopyToValueTensorOp>(op->getLoc(), tensor);
+        auto newListElements = llvm::to_vector(llvm::map_range(
+            listConstruct.getElements(), [&](Value tensor) -> Value {
+              if (tensor.getType().isa<NonValueTensorType>()) {
+                return rewriter.create<CopyToValueTensorOp>(op->getLoc(),
+                                                            tensor);
+              }
+              return tensor;
             }));
+
+        Type newListType = getContainerOrTensorTypeWithValueSemantics(listType);
+        if (!newListType) {
+          rewriter.cancelRootUpdate(op);
+          return rewriter.notifyMatchFailure(
+              op, "Unable to convert list type to value semantics.");
+        }
         opOperand.set(rewriter.create<PrimListConstructOp>(
-            op->getLoc(),
-            Torch::ListType::get(newListElements.front().getType()),
-            newListElements));
+            op->getLoc(), newListType, newListElements));
       } else if (auto optionalType = operandType.dyn_cast<OptionalType>()) {
         // TODO: A more general way to handle the optional type is to
         // introduce a `copy.to_optional_vtensor` op.
@@ -109,10 +137,10 @@ public:
                   "derefine");
         }
 
-        if (!derefine.operand().getType().isa<NonValueTensorType>())
+        if (!derefine.getOperand().getType().isa<NonValueTensorType>())
           continue;
         auto newOperand = rewriter.create<CopyToValueTensorOp>(
-            op->getLoc(), derefine.operand());
+            op->getLoc(), derefine.getOperand());
         opOperand.set(rewriter.create<DerefineOp>(
             op->getLoc(), Torch::OptionalType::get(newOperand.getType()),
             newOperand));
@@ -146,15 +174,9 @@ public:
                                 PatternRewriter &rewriter) const override {
     Location loc = op->getLoc();
     Operation *newOp;
-    if (isa<AtenUniform_Op>(op)) {
-      newOp = rewriter.create<PseudoAtenUniformOp>(loc, op->getResultTypes(),
-                                                   op->getOperands());
-    } else if (isa<AtenBernoulli_FloatOp>(op)) {
-      newOp = rewriter.create<PseudoAtenBernoulliFloatOp>(
+    if (isa<AtenBernoulli_FloatOp>(op)) {
+      newOp = rewriter.create<ValsemVariantAtenBernoulliFloatOp>(
           loc, op->getResultTypes(), op->getOperands());
-    } else if (isa<AtenFill_ScalarOp>(op)) {
-      newOp = rewriter.create<PseudoAtenFillScalarOp>(loc, op->getResultTypes(),
-                                                      op->getOperands());
     } else {
       return failure();
     }
@@ -195,7 +217,7 @@ public:
     assert(op->getNumRegions() == 0 && op->getNumSuccessors() == 0 &&
            "Torch JIT operators shouldn't have regions or successors");
 
-    Operation *newOp = rewriter.createOperation(state);
+    Operation *newOp = rewriter.create(state);
     auto tensor =
         rewriter.create<CopyToValueTensorOp>(op->getLoc(), newOp->getResult(0));
     createOverwriteTensorContents(rewriter, op->getLoc(), tensor,
@@ -211,7 +233,7 @@ static LogicalResult
 reduceNonValueTensorLiteralOpToValueTensorLiteralOp(NonValueTensorLiteralOp op,
                                                     PatternRewriter &rewriter) {
   Value valueTensor =
-      rewriter.create<ValueTensorLiteralOp>(op->getLoc(), op.value());
+      rewriter.create<ValueTensorLiteralOp>(op->getLoc(), op.getValue());
   Value tensor =
       copyTensorToType(rewriter, op->getLoc(), op.getType(), valueTensor);
   rewriter.replaceOp(op, {tensor});
@@ -223,16 +245,14 @@ class ReduceOpVariantsPass : public ReduceOpVariantsBase<ReduceOpVariantsPass> {
   void runOnOperation() override {
     MLIRContext *context = &getContext();
     RewritePatternSet patterns(context);
-    patterns.add<ConvertToImmutableTensors>(context);
+    patterns.add<ConvertHasValueSemanticsOpsToValueTensors>(context);
     patterns.add<ReduceTrailingUnderscoreInplaceVariant>(context);
     patterns.add(reduceNonValueTensorLiteralOpToValueTensorLiteralOp);
     patterns.add<ReduceNonValueSemanticOps>(context);
 
     ConversionTarget target(*context);
     target.addIllegalOp<NonValueTensorLiteralOp>();
-    target.addIllegalOp<AtenUniform_Op>();
     target.addIllegalOp<AtenBernoulli_FloatOp>();
-    target.addIllegalOp<AtenFill_ScalarOp>();
     target.markUnknownOpDynamicallyLegal([](Operation *op) {
       if (op->hasTrait<Torch::OpTrait::HasValueSemantics>()) {
         auto hasValueSemantics = [](Type t) {
@@ -260,7 +280,7 @@ class ReduceOpVariantsPass : public ReduceOpVariantsBase<ReduceOpVariantsPass> {
 };
 } // namespace
 
-std::unique_ptr<OperationPass<FuncOp>>
+std::unique_ptr<OperationPass<func::FuncOp>>
 mlir::torch::Torch::createReduceOpVariantsPass() {
   return std::make_unique<ReduceOpVariantsPass>();
 }

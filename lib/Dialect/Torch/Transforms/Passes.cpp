@@ -11,17 +11,8 @@
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/Passes.h"
 
-//===----------------------------------------------------------------------===//
-// Pass registration
-//===----------------------------------------------------------------------===//
-
-namespace {
-#define GEN_PASS_REGISTRATION
-#include "torch-mlir/Dialect/Torch/Transforms/Passes.h.inc"
-} // end namespace
-
 void mlir::torch::registerTorchPasses() {
-  ::registerPasses();
+  mlir::torch::registerPasses();
   mlir::PassPipelineRegistration<Torch::TorchLoweringPipelineOptions>(
       "torchscript-module-to-torch-backend-pipeline",
       "Pipeline lowering TorchScript object graph IR to Torch backend form.",
@@ -30,6 +21,13 @@ void mlir::torch::registerTorchPasses() {
       "torch-function-to-torch-backend-pipeline",
       "Pipeline lowering a Torch function to Torch backend form.",
       mlir::torch::Torch::createTorchFunctionToTorchBackendPipeline);
+  mlir::PassPipelineRegistration<Torch::TorchLoweringPipelineOptions>(
+      "torch-simplification-pipeline",
+      "Pipeline simplifying computations in the program.",
+      mlir::torch::Torch::createTorchSimplificationPipeline);
+  mlir::PassPipelineRegistration<>(
+      "torch-shape-refinement-pipeline", "Pipeline refining shapes of tensors.",
+      mlir::torch::Torch::createTorchShapeRefinementPipeline);
 }
 
 void mlir::torch::Torch::createTorchScriptModuleToTorchBackendPipeline(
@@ -63,89 +61,118 @@ void mlir::torch::Torch::createTorchScriptModuleToTorchBackendPipeline(
 
 void mlir::torch::Torch::createTorchFunctionToTorchBackendPipeline(
     OpPassManager &pm, const TorchLoweringPipelineOptions &options) {
-  // General considerations: As a matter of bring-up, we are simultaneously
-  // building out the frontend pipeline and also co-developing the backend
-  // support story as well. This means that sometimes the most expedient way to
-  // support a given program is to "optimize hard enough" that the parts of the
-  // program that touch unimplemented backend support go away (constant folded,
-  // dead-code-eliminated, etc.). In the fullness of time, most of that
-  // optimization should not be necessary, and we should have an "O0" pipeline
-  // that runs practically no optimizations.
-  // However, as a matter of expediency, at the moment we do run those
-  // optimizations. We guard those passes under the `options.optimize` option
-  // (which default to true, currently). We leave notes with the `OPT-ONLY` tag
-  // why we currently need that pass for correctness.
-  // We should eventually remove those passes from the default pipeline once
-  // backends have enough support.
-  // In particular the following features are needed in some form from backends:
-  // - Error handling (RaiseException + error string formatting)
-  // - First-class list type
-  // - torch.global_slot lowering
-  // - ...
-  // Please try to keep this list somewhat up to date when adding
-  // "optimize hard enough that it works" transformations.
-
   // Incorporate user annotations and remove signature Python-isms.
   pm.addPass(createAdjustCallingConventionsPass());
+  // Perform the bulk of lowering to the backend contract.
+  // See the pass documentation for more information.
+  pm.addPass(createLowerToBackendContractPass(
+      options.maxIterations, options.decompose, options.backendLegalOps));
+}
 
-  if (options.optimize) {
-    // Eliminate the PrimTupleIndexOp generated from the
-    // adjustCallingConventions
-    pm.addNestedPass<FuncOp>(createCanonicalizerPass());
-    // Inline global slots, which for most inference scenarios deletes them.
-    // This also exposes more information to intraprocedural transformations
-    // below like MaximizeValueSemantics and RefineTypes.
-    // OPT-ONLY: Don't rely on this pass to "lower" global slots by deleting.
-    // Also don't rely on this pass to expose constants into the program to
-    // simplify handling of "optional".
-    pm.addPass(createInlineGlobalSlotsPass());
-  }
-
+// A simplification pipeline to establish the invariants of the backend
+// contract (see `satisfiedBackendContract` in `LowerToBackendContract`).
+//
+// We structure this so that a single run of this pipeline is enough for
+// most models, but it is possible for it to take multiple runs to fully
+// clean things up when there are cyclic dependencies between certain
+// simplifications, such as a decomposition relying on shape refinement which
+// depends on another decomposition.
+//
+// Although technically this pipeline is an implementation detail of
+// LowerToBackendContract, we expose it here to help debugging.
+//
+// LowerToBackendContract will run this pipeline as many times as necessary, but
+// in general, it is costly to re-run this pipeline, since all the passes do
+// O(module size) work. We want the number of iterations of this pipeline
+// to be bounded by meaningful "always in practice small" program properties,
+// such as loop nesting depth, number of sequentially dependent steps of
+// constant global slots proving that other global slots are dead, etc.
+//
+// It is generally always possible to construct a pathological input that will
+// exceed the number of iterations. If we do find practical cases with
+// O(module size) number of iterations of this simplification pipeline, then
+// we may need to adjust the approach, such as to do some of the transformations
+// together at finer granularity.
+void mlir::torch::Torch::createTorchSimplificationPipeline(
+    OpPassManager &pm, const TorchLoweringPipelineOptions &options) {
+  // General cleanup.
+  pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
+  // Inline global slots to expose a bunch of simplification opportunities
+  // from constant hyperparameters, weights, etc.
+  pm.addPass(createInlineGlobalSlotsPass());
+  // Erase the module initializer if we have proven that all the global slots
+  // are gone.
+  pm.addPass(createEraseModuleInitializerPass());
+  // Clean up again to avoid needing to to back around the fixed-point
+  // iteration.
+  pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
   // Reduce variants of ops to a smaller set of primitives.
-  pm.addNestedPass<FuncOp>(createReduceOpVariantsPass());
-
-  if (options.optimize) {
-    // OPT-ONLY: Right now we rely on this to eliminate certain branches that
-    // guard unreachable code that backends can't handle yet, such as lists,
-    // RaiseException, unimplemented tensor ops, and only-used-in-training
-    // operations on `torch.global_slot`'s.
-    pm.addNestedPass<FuncOp>(createCanonicalizerPass());
-    // OPT-ONLY: We may have deleted some `torch.global_slot.get` /
-    // `torch.global_slot.get` ops, which may have left more
-    // `torch.global_slot`'s unused.
-    pm.addPass(createSymbolDCEPass());
-  }
-
-  //===--------------------------------------------------------------------===//
-  // Lowering to ranked !torch.vtensors of known dtype.
-  //===--------------------------------------------------------------------===//
-
-  // Do shape and dtype refinement.
-  pm.addNestedPass<FuncOp>(Torch::createRefineTypesPass());
-
+  pm.addNestedPass<func::FuncOp>(createReduceOpVariantsPass());
+  pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
+  // Remove dead global slots.
+  pm.addPass(createSymbolDCEPass());
+  // Convert the bulk of non-ABI-visible !torch.tensor's to !torch.vtensor's.
+  pm.addNestedPass<func::FuncOp>(Torch::createMaximizeValueSemanticsPass());
+  // Update the return op to return value tensors.
+  pm.addPass(Torch::createRefinePublicReturnPass());
+  pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
+  // Do shape refinement.
+  // This should be run before RefineTypes (which primarily does dtype
+  // inference), because Torch type promotion rules actually depend on the shape
+  // of the operand.
+  createTorchShapeRefinementPipeline(pm);
+  createTorchDtypeRefinementPipeline(pm);
+  // Refine types in the program, which mainly means inferring dtypes of ops.
+  pm.addNestedPass<func::FuncOp>(Torch::createRefineTypesPass());
   // Propagate to ABI return types the shape/dtype information discovered by
   // the previous pass. Doing this is ABI-compatible for our backends.
   pm.addPass(Torch::createRefinePublicReturnPass());
-
-  if (options.optimize) {
-    // This can fold away some branches given the information got from
-    // RefineTypes before doing maximize value sematics which only works with
-    // basic blocks.
-    pm.addNestedPass<FuncOp>(createCanonicalizerPass());
+  // This can fold away some branches given the information got from
+  // RefineTypes before doing maximize value sematics which only works with
+  // basic blocks.
+  pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
+  if (options.decompose) {
+    pm.addNestedPass<func::FuncOp>(
+        Torch::createDecomposeComplexOpsPass(options.backendLegalOps));
+    pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
   }
-  // Convert the bulk of non-ABI-visible !torch.tensor's to !torch.vtensor's.
-  pm.addNestedPass<FuncOp>(Torch::createMaximizeValueSemanticsPass());
+}
 
-  if (options.optimize) {
-    // All the type refinement we've done above has exposed new information
-    // that allows folding away more stuff.
-    // OPT-ONLY: Right now we rely on this to eliminate certain
-    // branches that guard unreachable code that backends can't handle yet, such
-    // as lists, RaiseException, unimplemented aten ops, and
-    // only-used-in-training operations on `torch.global_slot`'s.
-    pm.addNestedPass<FuncOp>(createCanonicalizerPass());
-  }
-  pm.addNestedPass<FuncOp>(Torch::createDecomposeComplexOpsPass());
+static void createRefinementPipeline(
+    mlir::OpPassManager &pm,
+    llvm::function_ref<std::unique_ptr<mlir::OperationPass<mlir::ModuleOp>>()>
+        reifyCalculationsPass,
+    llvm::function_ref<
+        std::unique_ptr<mlir::OperationPass<mlir::func::FuncOp>>()>
+        simplifyCalculationsPass) {
+  // Reify the library functions for each op that is present in the library.
+  pm.addPass(reifyCalculationsPass());
 
-  // TODO: VerifyTorchBackendContractPass.
+  // Inline the library functions to enable analysis and transformation.
+  // TODO: Only inline library functions (this will currently inline
+  // everything).
+  pm.addPass(mlir::createInlinerPass());
+
+  // Now, try to simplify calculations. This is unfortunately a "optimize
+  // as hard as possible" kind of thing, so it's inherently somewhat brittle.
+  // The idea is to keep strengthening what we do here to support the
+  // library functions. We don't need to support arbitrary programs, thankfully.
+  pm.addNestedPass<mlir::func::FuncOp>(simplifyCalculationsPass());
+  // Run CSE, then see if we can simplify further.
+  pm.addNestedPass<mlir::func::FuncOp>(mlir::createCSEPass());
+  pm.addNestedPass<mlir::func::FuncOp>(simplifyCalculationsPass());
+
+  // Drop calculations, leaving behind the-refined program.
+  pm.addNestedPass<mlir::func::FuncOp>(
+      mlir::torch::Torch::createDropAbstractInterpCalculationsPass());
+}
+
+void mlir::torch::Torch::createTorchShapeRefinementPipeline(OpPassManager &pm) {
+  createRefinementPipeline(pm, Torch::createReifyShapeCalculationsPass,
+                           Torch::createSimplifyShapeCalculationsPass);
+}
+
+void mlir::torch::Torch::createTorchDtypeRefinementPipeline(OpPassManager &pm) {
+  createRefinementPipeline(pm, Torch::createReifyDtypeCalculationsPass,
+                           Torch::createSimplifyDtypeCalculationsPass);
 }

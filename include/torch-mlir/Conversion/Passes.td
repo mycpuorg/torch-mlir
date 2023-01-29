@@ -16,17 +16,17 @@ include "mlir/Pass/PassBase.td"
 // Torch conversions
 //===----------------------------------------------------------------------===//
 
-def ConvertTorchToStd : Pass<"convert-torch-to-std", "FuncOp"> {
+def ConvertTorchToArith : Pass<"convert-torch-to-arith", "func::FuncOp"> {
   let summary = "Convert recognized Torch ops to Std ops";
-  let constructor = "mlir::torch::createConvertTorchToStdPass()";
+  let constructor = "mlir::torch::createConvertTorchToArithPass()";
 }
 
-def ConvertTorchToSCF: Pass<"convert-torch-to-scf", "FuncOp"> {
+def ConvertTorchToSCF: Pass<"convert-torch-to-scf", "func::FuncOp"> {
   let summary = "Convert recognized Torch ops to SCF ops";
   let constructor = "mlir::torch::createConvertTorchToSCFPass()";
 }
 
-def ConvertTorchToLinalg : Pass<"convert-torch-to-linalg", "FuncOp"> {
+def ConvertTorchToLinalg : Pass<"convert-torch-to-linalg", "func::FuncOp"> {
   let summary = "Convert recognized Torch ops to Linalg ops";
   let description = [{
     Convert ATen ops to linalg ops.
@@ -36,7 +36,7 @@ def ConvertTorchToLinalg : Pass<"convert-torch-to-linalg", "FuncOp"> {
     (ATen) and ops where such mismatches are undefined behavior (linalg).
 
     To model the termination of the program for implementing error guards,
-    we use the `std.assert` op.
+    we use the `cf.assert` op.
     This is a design decision that is at variance from other passes in the
     ecosystem, which use the
     `shape` dialect's witness system (`shape.cstr_*` family of ops feeding into
@@ -105,7 +105,7 @@ def ConvertTorchToLinalg : Pass<"convert-torch-to-linalg", "FuncOp"> {
   let constructor = "mlir::torch::createConvertTorchToLinalgPass()";
 }
 
-def ConvertTorchToTosa : Pass<"convert-torch-to-tosa", "FuncOp"> {
+def ConvertTorchToTosa : Pass<"convert-torch-to-tosa", "func::FuncOp"> {
   let summary = "Convert Torch ops to TOSA ops";
   let description = [{
     This pass assumes that TOSA ops are responsible for emitting error
@@ -113,5 +113,45 @@ def ConvertTorchToTosa : Pass<"convert-torch-to-tosa", "FuncOp"> {
   }];
   let constructor = "mlir::torch::createConvertTorchToTosaPass()";
 }
+
+def ConvertTorchToTMTensor : Pass<"convert-torch-to-tmtensor", "func::FuncOp"> {
+  let summary = "Convert recognized Torch ops to TMTensor/Linalg ops";
+  let description = [{
+    Convert ATen ops to tmtensor/linalg ops.
+
+    This pass is similar to the TorchToLinalg pass; the difference is that this
+    pass also makes use of TMTensor Dialect, which the former one doesn't.
+  }];
+  let constructor = "mlir::torch::createConvertTorchToTMTensorPass()";
+}
+
+def ConvertTorchConversionToMLProgram : Pass<"convert-torch-conversion-to-mlprogram", "func::FuncOp"> {
+  let summary = "Convert recognized TorchConversion ops to MLProgram ops";
+  let description = [{
+    Convert TorchConversion ops to mlprogram ops.
+  }];
+  let constructor = "mlir::torch::createConvertTorchConversionToMLProgramPass()";
+}
+
+#ifdef TORCH_MLIR_ENABLE_MHLO
+def ConvertTorchToMhlo : Pass<"convert-torch-to-mhlo", "func::FuncOp"> {
+  let summary = "Convert Torch ops to MHLO ops";
+  let description = [{
+    Convert Torch ops to mhlo ops.
+  }];
+  let constructor = "mlir::torch::createConvertTorchToMhloPass()";
+
+  // Specify any options.
+  let options = [
+    Option<"enableStaticShape", "enable-static-shape", "bool", /*default=*/"false",
+           "Enable static shape conversion">,
+    // The i64 calculation is much slower than i32 on some devices, such as
+    // Nvidia GPU. One can truncate from i64 to i32 since dimension sizes
+    // are unlikely to exceed the range of i32(4GiB)
+    Option<"enableI32Index", "enable-i32-index", "bool", /*default=*/"false",
+           "Enable truncate index from i64 to i32(unsafely)">,
+  ];
+}
+#endif
 
 #endif // TORCHMLIR_CONVERSION_PASSES

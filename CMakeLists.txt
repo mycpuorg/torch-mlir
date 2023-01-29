@@ -23,7 +23,7 @@ endif()
 
 project(torch-mlir LANGUAGES CXX C)
 set(CMAKE_C_STANDARD 11)
-set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD 17)
 
 macro(torch_mlir_add_llvm_external_project name identifier location)
   message(STATUS "Adding LLVM external project ${name} (${identifier}) -> ${location}")
@@ -36,12 +36,45 @@ macro(torch_mlir_add_llvm_external_project name identifier location)
   set(LLVM_EXTERNAL_PROJECTS ${LLVM_EXTERNAL_PROJECTS} CACHE STRING "" FORCE)
 endmacro()
 
+option(TORCH_MLIR_ENABLE_MHLO "Add mhlo dialect" ON)
+if(TORCH_MLIR_ENABLE_MHLO)
+  add_definitions(-DTORCH_MLIR_ENABLE_MHLO)
+endif()
+
+option(TORCH_MLIR_ENABLE_LTC "Enables LTC backend" OFF)
+
+if(TORCH_MLIR_ENABLE_LTC)
+    set(ENV{TORCH_MLIR_ENABLE_LTC} 1)
+    message(STATUS "LTC Backend build is enabled")
+else()
+    set(ENV{TORCH_MLIR_ENABLE_LTC} 0)
+    message(STATUS "LTC Backend build is disabled")
+endif()
+
 torch_mlir_add_llvm_external_project(
   torch-mlir-dialects
   TORCH_MLIR_DIALECTS
-  ${CMAKE_CURRENT_SOURCE_DIR}/external/llvm-external-projects/torch-mlir-dialects)
+  ${CMAKE_CURRENT_SOURCE_DIR}/externals/llvm-external-projects/torch-mlir-dialects)
 
-if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+option(TORCH_MLIR_OUT_OF_TREE_BUILD "Specifies an out of tree build" OFF)
+
+# Adjustments to use ccache on Windows
+if (WIN32)
+  find_program(ccache_exe ccache)
+  if(ccache_exe)
+    file(COPY_FILE ${ccache_exe} ${CMAKE_BINARY_DIR}/cl.exe ONLY_IF_DIFFERENT)
+    set(CMAKE_VS_GLOBALS
+      "CLToolExe=cl.exe"
+      "CLToolPath=${CMAKE_BINARY_DIR}"
+      "TrackFileAccess=false"
+      "UseMultiToolTask=true"
+      "DebugInformationFormat=OldStyle"
+    )
+  endif()
+endif()
+
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR OR TORCH_MLIR_OUT_OF_TREE_BUILD)
+  message(STATUS "Torch-MLIR out-of-tree build.")
   # Out-of-tree build
 
   #-------------------------------------------------------------------------------
@@ -80,11 +113,10 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 
   set(TORCH-MLIR_BUILT_STANDALONE 1)
   set(BACKEND_PACKAGE_STRING "LLVM ${LLVM_PACKAGE_VERSION}")
+  add_subdirectory(externals/llvm-external-projects/torch-mlir-dialects)
 else()
+  message(STATUS "Torch-MLIR in-tree build.")
   # In-tree build with LLVM_EXTERNAL_PROJECTS=torch-mlir
-  # FIXME: This should really be inherited from the LLVM tree.  In particular,
-  # it's going to change when cross-compiling.
-  set(MLIR_TABLEGEN_EXE mlir-tblgen)
 
   option(MLIR_ENABLE_BINDINGS_PYTHON "Enables MLIR Python Bindings" OFF)
   option(TORCH_MLIR_ENABLE_JIT_IR_IMPORTER "Enables JIT IR Importer" ON)
@@ -94,6 +126,17 @@ else()
   set(MLIR_INCLUDE_DIR ${LLVM_MAIN_SRC_DIR}/../mlir/include)
   set(MLIR_GENERATED_INCLUDE_DIR ${LLVM_BINARY_DIR}/tools/mlir/include)
   set(MLIR_INCLUDE_DIRS "${MLIR_INCLUDE_DIR};${MLIR_GENERATED_INCLUDE_DIR}")
+endif()
+
+if (TORCH_MLIR_ENABLE_MHLO)
+  set(MHLO_BUILD_EMBEDDED ON)
+  add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/externals/mlir-hlo
+    ${CMAKE_CURRENT_BINARY_DIR}/mlir-hlo
+    EXCLUDE_FROM_ALL)
+  include_directories(${CMAKE_CURRENT_SOURCE_DIR}/externals/mlir-hlo/include)
+  include_directories(${CMAKE_CURRENT_SOURCE_DIR}/externals/mlir-hlo)
+  include_directories(${CMAKE_CURRENT_BINARY_DIR}/mlir-hlo/include)
+  include_directories(${CMAKE_CURRENT_BINARY_DIR}/mlir-hlo)
 endif()
 
 set(TORCH_MLIR_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
@@ -107,8 +150,7 @@ include_directories(${CMAKE_CURRENT_BINARY_DIR}/include)
 
 function(torch_mlir_target_includes target)
   set(_dirs
-    $<BUILD_INTERFACE:${MLIR_INCLUDE_DIR}>
-    $<BUILD_INTERFACE:${MLIR_GENERATED_INCLUDE_DIR}>
+    $<BUILD_INTERFACE:${MLIR_INCLUDE_DIRS}>
     $<BUILD_INTERFACE:${TORCH_MLIR_SOURCE_DIR}/include>
     $<BUILD_INTERFACE:${TORCH_MLIR_BINARY_DIR}/include>
   )
@@ -148,6 +190,7 @@ add_custom_target(check-torch-mlir-all)
 add_dependencies(check-torch-mlir-all
   check-torch-mlir
   check-torch-mlir-dialects
+  check-torch-mlir-capi
   )
 
 if(MLIR_ENABLE_BINDINGS_PYTHON)

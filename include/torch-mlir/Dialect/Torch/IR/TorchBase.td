@@ -36,6 +36,15 @@ def Torch_Dialect : Dialect {
 
   let hasRegionArgAttrVerify = 1;
   let hasConstantMaterializer = 1;
+  let useDefaultTypePrinterParser = 0;
+  let useFoldAPI = kEmitFoldAdaptorFolder;
+
+  let extraClassDeclaration = [{
+    /// Parse a type registered to this dialect.
+    Type parseType(DialectAsmParser &parser) const override;
+    /// Print a type registered to this dialect.
+    void printType(Type type, DialectAsmPrinter &printer) const override;
+  }];
 }
 
 class TorchOpTrait<string name> : NativeOpTrait<""> {
@@ -44,8 +53,10 @@ class TorchOpTrait<string name> : NativeOpTrait<""> {
 }
 
 def HasValueSemantics : TorchOpTrait<"HasValueSemantics">;
+def ReadOnly : TorchOpTrait<"ReadOnly">;
 def IsTrailingUnderscoreInplaceVariant
   : TorchOpTrait<"IsTrailingUnderscoreInplaceVariant">;
 def AllowsTypeRefinement : TorchOpTrait<"AllowsTypeRefinement">;
+def AllowedInModuleInitializer : TorchOpTrait<"AllowedInModuleInitializer">;
 
 #endif // TORCH_BASE

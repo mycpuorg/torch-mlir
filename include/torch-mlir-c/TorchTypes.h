@@ -40,6 +40,10 @@ MLIR_CAPI_EXPORTED bool torchMlirTypeIsATorchOptional(MlirType t);
 MLIR_CAPI_EXPORTED MlirType
 torchMlirTorchOptionalTypeGet(MlirType containedType);
 
+/// Gets the subtype T of !torch.optional<T> type.
+MLIR_CAPI_EXPORTED MlirType
+torchMlirTorchOptionalTypeGetContained(MlirType containedType);
+
 //===----------------------------------------------------------------------===//
 // torch.tuple<T1, T2, T3> type.
 //===----------------------------------------------------------------------===//
@@ -52,6 +56,30 @@ MLIR_CAPI_EXPORTED MlirType
 torchMlirTorchTupleTypeGet(MlirContext context, intptr_t numContainedTypes,
                            MlirType const *containedTypes);
 
+/// Returns the number of types contained in a !torch.tuple type.
+MLIR_CAPI_EXPORTED size_t torchMlirTorchTupleTypeGetNumTypes(MlirType t);
+
+/// Returns the pos-th type in the !torch.tuple type.
+MLIR_CAPI_EXPORTED MlirType torchMlirTorchTupleTypeGetType(MlirType t, intptr_t pos);
+
+//===----------------------------------------------------------------------===//
+// torch.union<T1, T2, T3> type.
+//===----------------------------------------------------------------------===//
+
+/// Checks whether the given type is a !torch.union type
+MLIR_CAPI_EXPORTED bool torchMlirTypeIsATorchUnion(MlirType t);
+
+/// Gets the !torch.union type with contained types `containedTypes`.
+MLIR_CAPI_EXPORTED MlirType
+torchMlirTorchUnionTypeGet(MlirContext context, intptr_t numContainedTypes,
+                           MlirType const *containedTypes);
+
+/// Returns the number of types contained in a !torch.union type.
+MLIR_CAPI_EXPORTED size_t torchMlirTorchUnionTypeGetNumTypes(MlirType t);
+
+/// Returns the pos-th type in the !torch.union type.
+MLIR_CAPI_EXPORTED MlirType torchMlirTorchUnionTypeGetType(MlirType t, intptr_t pos);
+
 //===----------------------------------------------------------------------===//
 // torch.list<T> type.
 //===----------------------------------------------------------------------===//
@@ -61,6 +89,9 @@ MLIR_CAPI_EXPORTED bool torchMlirTypeIsATorchList(MlirType t);
 
 /// Gets the !torch.list<T> type with contained T.
 MLIR_CAPI_EXPORTED MlirType torchMlirTorchListTypeGet(MlirType containedType);
+
+/// Gets contained T in a !torch.list<T> type.
+MLIR_CAPI_EXPORTED MlirType torchMlirTorchListTypeGetContainedType(MlirType t);
 
 //===----------------------------------------------------------------------===//
 // torch.Device type.
@@ -134,6 +165,16 @@ MLIR_CAPI_EXPORTED bool torchMlirTypeIsATorchQInt8(MlirType t);
 MLIR_CAPI_EXPORTED MlirType torchMlirTorchQInt8TypeGet(MlirContext context);
 
 //===----------------------------------------------------------------------===//
+// torch.quint8 type.
+//===----------------------------------------------------------------------===//
+
+/// Checks whether the given type is a !torch.quint8 type
+MLIR_CAPI_EXPORTED bool torchMlirTypeIsATorchQUInt8(MlirType t);
+
+/// Gets the !torch.quint8 type.
+MLIR_CAPI_EXPORTED MlirType torchMlirTorchQUInt8TypeGet(MlirContext context);
+
+//===----------------------------------------------------------------------===//
 // torch.tensor type.
 //===----------------------------------------------------------------------===//
 
@@ -142,6 +183,7 @@ MLIR_CAPI_EXPORTED bool torchMlirTypeIsATorchNonValueTensor(MlirType t);
 
 /// Gets a !torch.tensor type.
 ///
+/// - `numSizes` having a value of -1 denotes an unranked tensor.
 /// - `optionalSizes` is allowed to be null, meaning that no size
 /// information is present (and `numSizes` is ignored in that case).  -
 /// `optionalDtype` is allowed to be null, meaning that no dtype
@@ -159,6 +201,22 @@ torchMlirTorchNonValueTensorTypeGetWithLeastStaticInformation(
 MLIR_CAPI_EXPORTED MlirType
 torchMlirTorchNonValueTensorTypeGetFromAttribute(MlirAttribute attr);
 
+/// Gets the the rank (number of dimensions) of a !torch.tensor
+MLIR_CAPI_EXPORTED int64_t torchMlirTorchNonValueTensorTypeGetRank(MlirType t);
+
+/// Return true if this type has a list of sizes.
+MLIR_CAPI_EXPORTED bool torchMlirTorchNonValueTensorTypeHasSizes(MlirType t);
+
+/// Return true if this type has a dtype.
+MLIR_CAPI_EXPORTED bool torchMlirTorchNonValueTensorTypeHasDtype(MlirType t);
+
+/// Gets the the sizes of the dimensions of a !torch.tensor; note -1 size
+/// indicates an unrefined/unknown size dimension.
+MLIR_CAPI_EXPORTED int64_t torchMlirTorchNonValueTensorTypeGetSizes(MlirType t, int64_t *sizes);
+
+/// Gets the the dtype (data type) of a !torch.tensor.
+MLIR_CAPI_EXPORTED MlirType torchMlirTorchNonValueTensorTypeGetDtype(MlirType t);
+
 //===----------------------------------------------------------------------===//
 // torch.vtensor type.
 //===----------------------------------------------------------------------===//
@@ -168,6 +226,7 @@ MLIR_CAPI_EXPORTED bool torchMlirTypeIsATorchValueTensor(MlirType t);
 
 /// Gets a !torch.vtensor type.
 ///
+/// - `numSizes` having a value of -1 denotes an unranked tensor.
 /// - `optionalSizes` is allowed to be null, meaning that no size
 /// information is present (and `numSizes` is ignored in that case).
 /// - `optionalDtype` is allowed to be null, meaning that no dtype
@@ -179,6 +238,26 @@ MLIR_CAPI_EXPORTED MlirType torchMlirTorchValueTensorTypeGet(
 /// Gets the !torch.tensor type with the least static information.
 MLIR_CAPI_EXPORTED MlirType
 torchMlirTorchValueTensorTypeGetWithLeastStaticInformation(MlirContext context);
+
+/// Gets the !torch.vtensor type with the tensor attribute.
+MLIR_CAPI_EXPORTED MlirType
+torchMlirTorchValueTensorTypeGetFromAttribute(MlirAttribute attr);
+
+/// Gets the the rank (number of dimensions) of a !torch.vtensor
+MLIR_CAPI_EXPORTED int64_t torchMlirTorchValueTensorTypeGetRank(MlirType t);
+
+/// Return true if this type has a list of sizes.
+MLIR_CAPI_EXPORTED bool torchMlirTorchValueTensorTypeHasSizes(MlirType t);
+
+/// Return true if this type has a dtype.
+MLIR_CAPI_EXPORTED bool torchMlirTorchValueTensorTypeHasDtype(MlirType t);
+
+/// Gets the the sizes of the dimensions of a !torch.vtensor; note -1 size
+/// indicates an unrefined/unknown size dimension.
+MLIR_CAPI_EXPORTED int64_t torchMlirTorchValueTensorTypeGetSizes(MlirType t, int64_t *sizes);
+
+/// Gets the the dtype (data type) of a !torch.vtensor.
+MLIR_CAPI_EXPORTED MlirType torchMlirTorchValueTensorTypeGetDtype(MlirType t);
 
 //===----------------------------------------------------------------------===//
 // !torch.none type.
@@ -230,6 +309,15 @@ MLIR_CAPI_EXPORTED bool torchMlirTypeIsATorchDict(MlirType t);
 /// Gets the !torch.dict type.
 MLIR_CAPI_EXPORTED MlirType torchMlirTorchDictTypeGet(MlirType keyType,
                                                       MlirType valueType);
+
+MLIR_CAPI_EXPORTED MlirType torchMlirTorchDictTypeGetChecked(
+    MlirContext context, MlirType keyType, MlirType valueType);
+
+/// Gets the key type of a !torch.dict<key, value> type.
+MLIR_CAPI_EXPORTED MlirType torchMlirTorchDictTypeGetKeyType(MlirType t);
+
+/// Gets the value type of a !torch.dict<key, value> type.
+MLIR_CAPI_EXPORTED MlirType torchMlirTorchDictTypeGetValueType(MlirType t);
 
 #ifdef __cplusplus
 }

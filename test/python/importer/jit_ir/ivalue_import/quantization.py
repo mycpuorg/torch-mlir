@@ -7,10 +7,12 @@ import typing
 import torch
 from torch_mlir.dialects.torch.importer.jit_ir import ModuleBuilder
 
+# UNSUPPORTED: system-darwin
 # RUN: %PYTHON %s | torch-mlir-opt | FileCheck %s
 
 mb = ModuleBuilder()
 
+# CHECK-LABEL: torch.class_type @__torch__.TestModule {
 class TestModule(torch.nn.Module):
     def __init__(self):
         super().__init__()

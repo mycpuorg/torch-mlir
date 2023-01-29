@@ -37,6 +37,12 @@ config.test_source_root = os.path.dirname(__file__)
 # test_exec_root: The root path where tests should be run.
 config.test_exec_root = os.path.join(config.torch_mlir_obj_root, 'test')
 
+# On Windows the path to python could contains spaces in which case it needs to
+# be provided in quotes.  This is the equivalent of how %python is setup in
+# llvm/utils/lit/lit/llvm/config.py.
+if "Windows" in config.host_os:
+  config.python_executable = '"%s"' % (config.python_executable)
+
 config.substitutions.append(('%PATH%', config.environment['PATH']))
 config.substitutions.append(('%shlibext', config.llvm_shlib_ext))
 config.substitutions.append(('%PYTHON', config.python_executable))
@@ -50,6 +56,9 @@ llvm_config.use_default_substitutions()
 # subdirectories contain auxiliary inputs for various tests in their parent
 # directories.
 config.excludes = ['lit.cfg.py', 'Inputs', 'Examples', 'CMakeLists.txt', 'README.txt', 'LICENSE.txt']
+
+if not bool(int(os.environ.get("TORCH_MLIR_ENABLE_LTC", 0))):
+   config.excludes.append("lazy_backend")
 
 # test_source_root: The root path where tests are located.
 config.test_source_root = os.path.dirname(__file__)

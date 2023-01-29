@@ -9,8 +9,7 @@
 
 #include "PassDetail.h"
 
-#include "mlir/Dialect/StandardOps/IR/Ops.h"
-#include "mlir/IR/BlockAndValueMapping.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Transforms/DialectConversion.h"
@@ -31,11 +30,12 @@ using namespace mlir::torch::Torch;
 using TypeBoundMap = DenseMap<std::pair<StringRef, int>, Type>;
 
 namespace {
-class AdjustCallingConventionForFunc : public OpConversionPattern<FuncOp> {
+class AdjustCallingConventionForFunc
+    : public OpConversionPattern<func::FuncOp> {
 public:
   using OpConversionPattern::OpConversionPattern;
   LogicalResult
-  matchAndRewrite(FuncOp func, OpAdaptor adaptor,
+  matchAndRewrite(func::FuncOp func, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     MLIRContext *context = func.getContext();
     auto typeBoundIdent = StringAttr::get(context, "torch.type_bound");
@@ -70,7 +70,7 @@ public:
                                       typeConverter);
 
     SmallVector<Type> newResultTypes;
-    for (auto type : func.getType().getResults()) {
+    for (auto type : func.getFunctionType().getResults()) {
       if (auto none = type.dyn_cast<Torch::NoneType>()) {
         continue;
       }
@@ -93,14 +93,15 @@ public:
 } // namespace
 
 namespace {
-class AdjustCallingConventionForCall : public OpConversionPattern<CallOp> {
+class AdjustCallingConventionForCall
+    : public OpConversionPattern<func::CallOp> {
 public:
   AdjustCallingConventionForCall(TypeConverter &converter, MLIRContext *context,
                                  TypeBoundMap &typeBoundMap)
-      : OpConversionPattern<CallOp>(converter, context),
+      : OpConversionPattern<func::CallOp>(converter, context),
         typeBoundMap(typeBoundMap) {}
   LogicalResult
-  matchAndRewrite(CallOp call, OpAdaptor adaptor,
+  matchAndRewrite(func::CallOp call, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     SmallVector<Type> convertedResults;
     if (failed(typeConverter->convertTypes(call.getResultTypes(),
@@ -126,8 +127,8 @@ public:
       newOperands.push_back(operand.value());
     }
 
-    CallOp newCall = rewriter.create<CallOp>(call.getLoc(), call.getCallee(),
-                                             convertedResults, newOperands);
+    func::CallOp newCall = rewriter.create<func::CallOp>(
+        call.getLoc(), call.getCallee(), convertedResults, newOperands);
     int newOpResultIdx = 0;
     SmallVector<Value> newResults;
     for (auto type : call.getResultTypes()) {
@@ -153,11 +154,12 @@ private:
 } // namespace
 
 namespace {
-class AdjustCallingConventionForReturn : public OpConversionPattern<ReturnOp> {
+class AdjustCallingConventionForReturn
+    : public OpConversionPattern<func::ReturnOp> {
 public:
   using OpConversionPattern::OpConversionPattern;
   LogicalResult
-  matchAndRewrite(ReturnOp op, OpAdaptor adaptor,
+  matchAndRewrite(func::ReturnOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
 
     SmallVector<Value> newOperands;
@@ -178,14 +180,59 @@ public:
       }
       newOperands.push_back(operand);
     }
-    rewriter.replaceOpWithNewOp<ReturnOp>(op, newOperands);
+    rewriter.replaceOpWithNewOp<func::ReturnOp>(op, newOperands);
     return success();
   }
 };
 } // namespace
 
-static LogicalResult adjustCallingConventions(FuncOp func,
+static bool isValidNonContainerResultType(Type resultType) {
+  return resultType.isa<Torch::BaseTensorType>() ||
+         resultType.isa<Torch::FloatType>() ||
+         resultType.isa<Torch::IntType>() ||
+         resultType.isa<Torch::BoolType>() ||
+         resultType.isa<Torch::NoneType>();
+}
+
+static LogicalResult validateReturns(func::FuncOp func) {
+  if (func.getResultTypes().size() > 1) {
+    return func->emitError(
+      "Functions directly imported from Python should only ever return one "
+      "item. Multiple return values are returned as a tuple.");
+  }
+
+  // Allow returns of nothing. This shouldn't be possible from Python, but it
+  // can happen in IR that's been directly constructed.
+  if (func.getResultTypes().size() == 0)
+    return success();
+
+  const auto& resultType = func.getResultTypes().front();
+
+  // Allow single tensor, scalar, and bool returns
+  if (isValidNonContainerResultType(resultType)) {
+    return success();
+  }
+
+  // Allow multi-tensor/scalar/bool tuple returns
+  if (auto tuple = resultType.dyn_cast<Torch::TupleType>()) {
+    const auto& containedTypes = tuple.getContainedTypes();
+    bool containsValidTypes = llvm::all_of(
+      tuple.getContainedTypes(), isValidNonContainerResultType);
+    if (containedTypes.size() >= 2 && containsValidTypes) {
+      return success();
+    }
+  }
+
+  return func->emitError(
+    "Functions must return a single tensor-like value, multiple tensor-like "
+    "values, or a tuple of more than one tensor-like value. Tensor-like "
+    "values: tensors, scalars, bools, and Nones.");
+}
+
+static LogicalResult adjustCallingConventions(func::FuncOp func,
                                               TypeBoundMap &typeBoundMap) {
+  if (failed(validateReturns(func)))
+      return failure();
   MLIRContext *context = func.getContext();
   RewritePatternSet patterns(context);
   TypeConverter typeConverter;
@@ -215,7 +262,7 @@ static LogicalResult adjustCallingConventions(FuncOp func,
   patterns.add<AdjustCallingConventionForReturn>(typeConverter, context);
 
   ConversionTarget target(*context);
-  target.addDynamicallyLegalOp<FuncOp>([](FuncOp func) {
+  target.addDynamicallyLegalOp<func::FuncOp>([](func::FuncOp func) {
     for (int i = 0, e = func.getNumArguments(); i != e; i++) {
       if (func.getArgAttr(i, "torch.type_bound"))
         return false;
@@ -223,7 +270,7 @@ static LogicalResult adjustCallingConventions(FuncOp func,
         return false;
     }
     for (int i = 0, e = func.getNumResults(); i != e; i++) {
-      if (func.getType().getResults()[i].isa<Torch::NoneType>())
+      if (func.getFunctionType().getResults()[i].isa<Torch::NoneType>())
         return false;
     }
     return true;
@@ -233,13 +280,15 @@ static LogicalResult adjustCallingConventions(FuncOp func,
   //
   // Bug for doing this better https://bugs.llvm.org/show_bug.cgi?id=49812
   DenseSet<Operation *> opsInOriginalProgram;
-  func.walk([&](CallOp op) { opsInOriginalProgram.insert(op.getOperation()); });
   func.walk(
-      [&](ReturnOp op) { opsInOriginalProgram.insert(op.getOperation()); });
-  target.addDynamicallyLegalOp<CallOp>([&](CallOp op) {
+      [&](func::CallOp op) { opsInOriginalProgram.insert(op.getOperation()); });
+  func.walk([&](func::ReturnOp op) {
+    opsInOriginalProgram.insert(op.getOperation());
+  });
+  target.addDynamicallyLegalOp<func::CallOp>([&](func::CallOp op) {
     return !opsInOriginalProgram.contains(op.getOperation());
   });
-  target.addDynamicallyLegalOp<ReturnOp>([&](ReturnOp op) {
+  target.addDynamicallyLegalOp<func::ReturnOp>([&](func::ReturnOp op) {
     return !opsInOriginalProgram.contains(op.getOperation());
   });
   target.addLegalOp<CopyToNonValueTensorOp, CopyToValueTensorOp>();
@@ -249,7 +298,7 @@ static LogicalResult adjustCallingConventions(FuncOp func,
   target.addLegalOp<PrimTupleIndexOp>();
   target.addLegalOp<PrimTupleConstructOp>();
   // We don't know how to rewrite it, so mark it as illegal.
-  target.addIllegalOp<CallIndirectOp>();
+  target.addIllegalOp<func::CallIndirectOp>();
   if (failed(applyPartialConversion(func.getOperation(), target,
                                     std::move(patterns))))
     return failure();
@@ -262,7 +311,7 @@ class AdjustCallingConventionsPass
   void runOnOperation() override {
     auto module = getOperation();
     TypeBoundMap typeBoundMap;
-    for (auto func : module.getOps<FuncOp>()) {
+    for (auto func : module.getOps<func::FuncOp>()) {
       for (int i = 0, e = func.getNumArguments(); i != e; i++) {
         auto typeBoundAttr =
             func.getArgAttrOfType<TypeAttr>(i, "torch.type_bound");
@@ -271,7 +320,7 @@ class AdjustCallingConventionsPass
         typeBoundMap[{func.getName(), i}] = typeBoundAttr.getValue();
       }
     }
-    for (auto func : module.getOps<FuncOp>()) {
+    for (auto func : module.getOps<func::FuncOp>()) {
       if (failed(adjustCallingConventions(func, typeBoundMap)))
         return signalPassFailure();
     }

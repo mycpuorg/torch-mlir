@@ -25,8 +25,6 @@
 
 #include <torch/csrc/jit/ir/ir.h>
 
-#include "pybind.h"
-
 namespace torch_mlir {
 
 // An annotation on a class's attribute (corresponds to a c10::ClassAttribute).
@@ -126,9 +124,9 @@ private:
   std::vector<MethodAnnotation> methodAnnotations;
 };
 
-// A map of annotations on `c10::ClassType`s
+// A map of annotations on `c10::ClassType` names
 using ClassAnnotationMap =
-    std::unordered_map<c10::ClassType *, std::unique_ptr<ClassAnnotation>>;
+    std::map<std::string, std::unique_ptr<ClassAnnotation>>;
 
 // A collection of class annotations + methods to create the annotations.
 //
@@ -162,7 +160,8 @@ public:
   // These will be put into an `ArgAnnotation` struct -- see there for
   // precise definitions of the promised semantics of each entry.
   void annotateArgs(c10::ClassType &rootClassType,
-                    std::vector<std::string> path, py::list argAnnotations);
+                    std::vector<std::string> path,
+                    std::vector<ArgAnnotation> argAnnotations);
 
   // The annotations collected so far.
   const ClassAnnotationMap &getAnnotationMap();
@@ -191,8 +190,6 @@ private:
   std::unordered_map<torch::jit::Function *, MethodAnnotation *>
       functionToMethodMap;
 };
-
-void initClassAnnotatorBindings(py::module &m);
 
 } // namespace torch_mlir
 

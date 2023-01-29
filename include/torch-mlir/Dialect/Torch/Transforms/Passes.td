@@ -118,7 +118,7 @@ def AdjustCallingConventions
 
     The transformations performed are:
     - `torch.type_bound` annotations are incorporated into the type of the
-      function arguments, which should be `!numpy.ndarray<...>`'s.
+      function arguments, which should be `!torch.tensor<...>`'s.
     - Python-isms are rewritten to MLIR-isms
       - NoneType return is rewritten to the absence of a return value.
       - Tuple return is rewritten to multiple return values.
@@ -126,7 +126,7 @@ def AdjustCallingConventions
   }];
 }
 
-def RefineTypes : Pass<"torch-refine-types", "FuncOp"> {
+def RefineTypes : Pass<"torch-refine-types", "func::FuncOp"> {
   let summary = "Refine types";
   let constructor = "mlir::torch::Torch::createRefineTypesPass()";
   let description = [{
@@ -143,13 +143,13 @@ def InlineGlobalSlots : Pass<"torch-inline-global-slots", "ModuleOp"> {
 
     Note: This pass inlines everything that is safe to inline. That is, it
     doesn't have a cost model. This is likely to pessimize programs with
-    significant amounts of computation inside torch.global_slot initializer
+    significant amounts of computation inside torch.initialize.global_slotsr
     regions (but this currently doesn't happen due to how TorchScript modules
     are imported -- the contents are just constants).
   }];
 }
 
-def ReduceOpVariants : Pass<"torch-reduce-op-variants", "FuncOp"> {
+def ReduceOpVariants : Pass<"torch-reduce-op-variants", "func::FuncOp"> {
   let summary = "Reduces variants of ops to a smaller set of ops.";
   let constructor = "mlir::torch::Torch::createReduceOpVariantsPass()";
   let description = [{
@@ -165,7 +165,7 @@ def ReduceOpVariants : Pass<"torch-reduce-op-variants", "FuncOp"> {
   }];
 }
 
-def MaximizeValueSemantics : Pass<"torch-maximize-value-semantics", "FuncOp"> {
+def MaximizeValueSemantics : Pass<"torch-maximize-value-semantics", "func::FuncOp"> {
   let summary = "Use value-semantic tensors where possible.";
   let description = [{
     Use value-semantic tensors where possible to make the program more
@@ -215,9 +215,16 @@ def RefinePublicReturn : Pass<"torch-refine-public-return", "ModuleOp"> {
   }];
 }
 
-def DecomposeComplexOps : Pass<"torch-decompose-complex-ops", "FuncOp"> {
+def DecomposeComplexOps : Pass<"torch-decompose-complex-ops", "func::FuncOp"> {
   let summary = "Decompose complicated torch operations";
-  let constructor = "mlir::torch::Torch::createDecomposeComplexOpsPass()";
+  let constructor = [{
+    mlir::torch::Torch::createDecomposeComplexOpsPass(/*legalOps=*/{})
+  }];
+  let options = [
+    ListOption<"legalOps", "legal-ops", "std::string",
+               "List of operation names that should be considered legal",
+               "llvm::cl::ZeroOrMore">
+  ];
   let description = [{
     Decompose torch operation that are losslessly represented as combinations of
     other operations, modulo appropropriate compiler fusion. Note that this pass
@@ -228,6 +235,124 @@ def DecomposeComplexOps : Pass<"torch-decompose-complex-ops", "FuncOp"> {
     An example of the transformations done in this pass is:
     - convert aten.softmax to softmax(x, dim)
             => tmp=exp(x); tmp / sum(tmp, dim, keepdim=True)
+  }];
+}
+
+def ReifyShapeCalculations : Pass<"torch-reify-shape-calculations", "ModuleOp"> {
+  let summary = "Reify shape calculations.";
+  let constructor = "mlir::torch::Torch::createReifyShapeCalculationsPass()";
+  let description = [{
+  }];
+}
+
+def SimplifyShapeCalculations : Pass<"torch-simplify-shape-calculations", "func::FuncOp"> {
+  let summary = "Simplify reified shape calculations.";
+  let constructor = "mlir::torch::Torch::createSimplifyShapeCalculationsPass()";
+  let description = [{
+    Mainly for getting rank specialization.
+  }];
+}
+
+def ReifyDtypeCalculations : Pass<"torch-reify-dtype-calculations", "ModuleOp"> {
+  let summary = "Reify dtype calculations.";
+  let constructor = "mlir::torch::Torch::createReifyDtypeCalculationsPass()";
+  let description = [{
+  }];
+}
+
+def SimplifyDtypeCalculations : Pass<"torch-simplify-dtype-calculations", "func::FuncOp"> {
+  let summary = "Simplify reified dtype calculations.";
+  let constructor = "mlir::torch::Torch::createSimplifyDtypeCalculationsPass()";
+  let description = [{
+  }];
+}
+
+def DropAbstractInterpCalculations : Pass<"torch-drop-abstract-interp-calculations", "func::FuncOp"> {
+  let summary = "Drop reified abstract interpretation calculations.";
+  let constructor = "mlir::torch::Torch::createDropAbstractInterpCalculationsPass()";
+  let description = [{
+  }];
+}
+
+def EraseModuleInitializer
+    : Pass<"torch-erase-module-initializer", "ModuleOp"> {
+  let summary = "Erase the `torch.global_slot.module_initializer` op.";
+  let constructor =
+    "mlir::torch::Torch::createEraseModuleInitializerPass()";
+  let description = [{
+    Backends cannot currently handle module initializers, so we omit them from
+    our backend contract. This pass removes the
+    `torch.global_slot.module_initializer` op from the module if legal.
+  }];
+}
+
+def LowerToBackendContract
+    : Pass<"torch-lower-to-backend-contract", "ModuleOp"> {
+  let summary = "Perform simplifications until the backend contract is satisfied.";
+  let constructor = [{
+    mlir::torch::Torch::createLowerToBackendContractPass(
+      /*maxIterations=*/10, /*decompose=*/true, /*backendLegalOps=*/{})
+  }];
+  let description = [{
+    This pass performs the bulk of the lowering of the program's computations
+    to the backend contract. This pass does not do any global program
+    restructuring -- it works entirely within a single semantic model
+    of a `builtin.module` with `torch.global_slot` ops and `func.func` ops.
+    
+    This pass runs a set of simplifications within that semantic model until
+    the backend contract is satisfied, and fails if it cannot be satisfied.
+    In particular, the backend contract consists of:
+    - Tensors
+      - Have been converted to value semantics.
+      - Have at least a known rank, though ideally a maximally inferred shape.
+      - Have a known dtype.
+    - `torch.global_slot`'s have been eliminated from the program.
+    - Ops have been decomposed.
+
+    This particular choice of backend contract was born out of a common set of
+    requirements from backends, along with aligning with long-term PyTorch
+    direction of being more tracing-based. The set of simplifications performed
+    here can be thought of as simulating the kinds of simplifications that
+    happen naturally as part of tracing, but in a way that is applicable
+    to our TorchScript frontend. For the LazyTensorCore frontend, the backend
+    contract trivially holds (except for certain decompositions).
+
+    Generally it is not desirable to have a compiler where successful
+    compilation depends on "optimizing hard enough", but in this case, there
+    seems to be enough alignment and recognition in the industry that the
+    Python-based programming model in the source program is too dynamic
+    to feasibly handle in totality without a tracing approach that has access
+    to the source program to re-trace in the face of dynamism (e.g. the ability
+    to do what TorchDynamo calls "graph break"). We are attempting to maintain
+    a practical compiler that works well given the current set of constraints
+    of the TorchScript frontend that PyTorch provides us, and are working to
+    co-design PyTorch's direction so that we land in a place where most of this
+    "optimizing hard enough" is not necessary.
+  }];
+  let options = [
+    Option<"maxIterations", "max-iterations", "int", /*default=*/"10",
+           "Maximum number of invocations of the simplification pipeline.">,
+    Option<"decompose", "decompose", "bool", /*default=*/"true",
+           "Decompose ops.">,
+    ListOption<"backendLegalOps", "backend-legal-ops", "std::string",
+               "List of ops to be considered legal for the backend.">
+
+  ];
+  // TODO: Debug why this is needed, even though the input program has func.func
+  // ops in it.
+  let dependentDialects = ["func::FuncDialect"];
+}
+
+def VerifyBackendContractNoDecompositions
+    : Pass<"torch-verify-backend-contract-no-decompositions", "ModuleOp"> {
+  let summary = "Check that program satisfies backend contract.";
+  let constructor = [{
+    mlir::torch::Torch::createVerifyBackendContractNoDecompositionsPass()
+  }];
+  let description = [{
+    This pass performs a set of inspections to check that program satisfies backend
+    contract assuming that no decompositions were applied. In case of check failure
+    it prints out the error message and returns `signalPassFailure()` status.
   }];
 }
 

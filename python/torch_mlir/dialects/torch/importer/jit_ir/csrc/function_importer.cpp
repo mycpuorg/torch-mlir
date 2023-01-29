@@ -18,17 +18,17 @@
 #include "mlir-c/BuiltinTypes.h"
 #include "mlir-c/Diagnostics.h"
 
-namespace py = pybind11;
 using namespace torch_mlir;
 
 MlirOperation torch_mlir::importJitFunctionAsFuncOp(
     MlirContext context, torch::jit::Function *function,
-    std::function<MlirAttribute(int)> getArgAttribute) {
+    std::function<MlirAttribute(int)> getArgAttribute,
+    const ImportOptions &importOptions) {
   // Useful for debugging:
   // graph->dump();
   MlirLocation loc = mlirLocationUnknownGet(context);
   MlirType functionType =
-      getFunctionTypeFromSchema(context, function->getSchema());
+      getFunctionTypeFromSchema(context, function->getSchema(), importOptions);
   // Use the function's qualified name from the compilation unit.
   // This is a stable linkage name that matches Python module lookup
   // conventions (see compilation unit import in IValueImporter for more details
@@ -36,8 +36,8 @@ MlirOperation torch_mlir::importJitFunctionAsFuncOp(
   MlirAttribute symNameAttr = mlirStringAttrGet(
       context, toMlirStringRef(function->qualname().qualifiedName()));
   MlirOperation func = createMlirOperation(
-      "builtin.func", loc, mlirRegionCreate(),
-      toMlirNamedAttribute("type", mlirTypeAttrGet(functionType)),
+      "func.func", loc, mlirRegionCreate(),
+      toMlirNamedAttribute("function_type", mlirTypeAttrGet(functionType)),
       toMlirNamedAttribute("sym_name", symNameAttr));
   std::vector<MlirAttribute> argAttrDicts;
   for (int i = 0, e = mlirFunctionTypeGetNumInputs(functionType); i != e; i++) {
@@ -57,15 +57,20 @@ MlirOperation torch_mlir::importJitFunctionAsFuncOp(
        i++) {
     resultTypes.push_back(mlirFunctionTypeGetResult(functionType, i));
   }
+  std::vector<MlirType> inputTypes;
+  for (int i = 0, e = mlirFunctionTypeGetNumInputs(functionType); i != e; i++) {
+    inputTypes.push_back(mlirFunctionTypeGetInput(functionType, i));
+  }
   auto createTerminator = [&](c10::ArrayRef<MlirValue> yieldedValues,
                               MlirBlock appendToBlock) {
-    createMlirOperationAtEnd(
-        appendToBlock, "std.return", loc,
-        derefineValues(yieldedValues, resultTypes, loc, appendToBlock));
+    createMlirOperationAtEnd(appendToBlock, "func.return", loc,
+                             adjustStaticInformationForValues(
+                                 appendToBlock, loc, yieldedValues, resultTypes,
+                                 /*userAllowsRefinement=*/false));
   };
   MlirBlock block = importBlock(
       context, torch::jit::toGraphFunction(*function).graph()->block(),
-      createTerminator);
+      createTerminator, inputTypes, importOptions);
   mlirRegionAppendOwnedBlock(bodyRegion, block);
   return func;
 }

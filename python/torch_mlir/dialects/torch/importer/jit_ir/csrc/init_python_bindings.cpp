@@ -11,8 +11,9 @@
 
 #include <ATen/core/dispatch/Dispatcher.h>
 
-#include "class_annotator.h"
+#include "class_annotator_pybind.h"
 #include "get_registered_ops.h"
+#include "import_options_pybind.h"
 #include "module_builder.h"
 
 using namespace torch_mlir;
@@ -21,4 +22,5 @@ PYBIND11_MODULE(_jit_ir_importer, m) {
   ModuleBuilder::bind(m);
   initClassAnnotatorBindings(m);
   initGetRegisteredOpsBindings(m);
+  initImportOptionsBindings(m);
 }

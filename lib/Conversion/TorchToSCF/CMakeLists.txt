@@ -13,8 +13,8 @@ add_mlir_conversion_library(TorchMLIRTorchToSCF
   LINK_LIBS PUBLIC
   MLIRIR
   MLIRPass
-  MLIRSCF
-  MLIRStandard
+  MLIRSCFDialect
+  MLIRFuncDialect
   TorchMLIRTorchDialect
   TorchMLIRTorchConversionDialect
 )

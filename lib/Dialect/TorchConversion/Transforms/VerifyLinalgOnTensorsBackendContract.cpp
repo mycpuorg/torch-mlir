@@ -9,13 +9,19 @@
 
 #include "PassDetail.h"
 
+#include "mlir/Dialect/Affine/IR/AffineOps.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/MLProgram/IR/MLProgram.h"
 #include "mlir/Dialect/Math/IR/Math.h"
-#include "mlir/Dialect/StandardOps/IR/Ops.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/Transforms/DialectConversion.h"
+#include "torch-mlir-dialects/Dialect/TMTensor/IR/TMTensorDialect.h"
+#include "torch-mlir-dialects/Dialect/TMTensor/IR/TMTensorOps.h"
 #include "torch-mlir/Dialect/TorchConversion/IR/TorchConversionOps.h"
 #include "torch-mlir/Dialect/TorchConversion/Transforms/Passes.h"
 
@@ -24,6 +30,8 @@
 using namespace mlir;
 using namespace mlir::torch;
 using namespace mlir::torch::TorchConversion;
+using namespace TMTensor;
+
 
 namespace {
 class VerifyLinalgOnTensorsBackendContractPass
@@ -56,21 +64,25 @@ class VerifyLinalgOnTensorsBackendContractPass
     ConversionTarget target(*context);
 
     // Structural operations.
-    target.addDynamicallyLegalOp<ModuleOp, FuncOp, ReturnOp>(opHasLegalTypes);
+    target.addDynamicallyLegalOp<ModuleOp, func::FuncOp, func::ReturnOp>(
+        opHasLegalTypes);
 
     target.addDynamicallyLegalOp<GetNextSeedOp>(opHasLegalTypes);
 
     // Basic scalar operations.
-    target.addDynamicallyLegalDialect<StandardOpsDialect>(isLegalScalarOp);
+    target.addDynamicallyLegalDialect<func::FuncDialect>(isLegalScalarOp);
     target.addDynamicallyLegalDialect<math::MathDialect>(isLegalScalarOp);
-    target.addDynamicallyLegalDialect<arith::ArithmeticDialect>(
-        isLegalScalarOp);
+    target.addDynamicallyLegalDialect<arith::ArithDialect>(isLegalScalarOp);
 
     // Tensor operations should go through linalg and the tensor dialect.
     target.addDynamicallyLegalDialect<linalg::LinalgDialect>(opHasLegalTypes);
     target.addDynamicallyLegalDialect<tensor::TensorDialect>(opHasLegalTypes);
     target.addDynamicallyLegalDialect<AffineDialect>(opHasLegalTypes);
     target.addDynamicallyLegalDialect<cf::ControlFlowDialect>(opHasLegalTypes);
+    target.addDynamicallyLegalDialect<TMTensorDialect>(opHasLegalTypes);
+    target.addDynamicallyLegalDialect<scf::SCFDialect>(opHasLegalTypes);
+    target.addDynamicallyLegalDialect<ml_program::MLProgramDialect>(
+        opHasLegalTypes);
 
     // ConstantOp is used for tensors and for scalars.
     target.addDynamicallyLegalOp<arith::ConstantOp>(opHasLegalTypes);

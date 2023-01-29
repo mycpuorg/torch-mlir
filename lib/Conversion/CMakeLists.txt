@@ -1,10 +1,27 @@
 add_subdirectory(TorchToLinalg)
 add_subdirectory(TorchToSCF)
-add_subdirectory(TorchToStd)
+add_subdirectory(TorchToArith)
 add_subdirectory(TorchToTosa)
+if(TORCH_MLIR_ENABLE_MHLO)
+  add_subdirectory(TorchToMhlo)
+endif()
+add_subdirectory(TorchToTMTensor)
+add_subdirectory(TorchConversionToMLProgram)
+add_subdirectory(Utils)
 
 # TODO: Automate this with add_torch_mlir_conversion_library.
-#get_property(torch_mlir_conversion_libs GLOBAL PROPERTY TORCH_MLIR_CONVERSION_LIBS)
+set(linked_libs TorchMLIRTorchToLinalg
+                TorchMLIRTorchToSCF
+                TorchMLIRTorchToArith
+                TorchMLIRTorchToTosa
+                TorchMLIRTorchToTMTensor
+                TorchMLIRTorchConversionToMLProgram
+                TorchMLIRConversionUtils)
+if(TORCH_MLIR_ENABLE_MHLO)
+  list(APPEND linked_libs
+    MhloPasses
+    TorchMLIRTorchToMhlo)
+endif()
 
 add_mlir_library(TorchMLIRConversionPasses
   Passes.cpp
@@ -16,9 +33,6 @@ add_mlir_library(TorchMLIRConversionPasses
   Core
 
   LINK_LIBS PUBLIC
-  TorchMLIRTorchToLinalg
-  TorchMLIRTorchToSCF
-  TorchMLIRTorchToStd
-  TorchMLIRTorchToTosa
+  ${linked_libs}
   #${torch_mlir_conversion_libs}
 )

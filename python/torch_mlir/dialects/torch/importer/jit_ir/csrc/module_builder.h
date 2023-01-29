@@ -10,8 +10,6 @@
 #ifndef TORCHMLIRJITIRIMPORTER_CSRC_BUILDER_H
 #define TORCHMLIRJITIRIMPORTER_CSRC_BUILDER_H
 
-#include "pybind.h"
-
 #include "class_annotator.h"
 
 #include "mlir-c/IR.h"
@@ -20,6 +18,7 @@
 #include <torch/csrc/jit/api/compilation_unit.h>
 #include <torch/csrc/jit/api/module.h>
 #include <torch/csrc/jit/ir/ir.h>
+#include <torch/csrc/utils/pybind.h>
 
 namespace torch_mlir {
 
@@ -40,13 +39,15 @@ public:
   // Just a bit of naming cruft.
   // Returns the same function, making it suitable as a nested decorator.
   torch::jit::StrongFunctionPtr
-  importFunction(torch::jit::StrongFunctionPtr function);
+  importFunction(torch::jit::StrongFunctionPtr function,
+                 py::object maybeImportOptions);
 
   // Imports a torch::jit::Module into the current module, using the
   // annotations, if not none, provided in `maybeClassAnnotator` which should be
   // a ClassAnnotator.
   void importModule(torch::jit::Module jitModule,
-                    py::object maybeClassAnnotator);
+                    py::object maybeClassAnnotator,
+                    py::object maybeImportOptions);
 
 private:
   MlirBlock getBodyBlock();

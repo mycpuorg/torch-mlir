@@ -19,6 +19,7 @@
 #include "mlir-c/BuiltinAttributes.h"
 #include "mlir-c/BuiltinTypes.h"
 #include "mlir-c/Diagnostics.h"
+#include "torch-mlir-c/TorchOps.h"
 #include "torch-mlir-c/TorchTypes.h"
 
 using namespace torch_mlir;
@@ -51,6 +52,14 @@ static MlirType getMlirTypeForTorchScalarTypeRaw(MlirContext context,
     return mlirF16TypeGet(context);
   case ScalarType::QInt8:
     return torchMlirTorchQInt8TypeGet(context);
+  case ScalarType::QUInt8:
+    return torchMlirTorchQUInt8TypeGet(context);
+  case ScalarType::ComplexHalf:
+    return mlirComplexTypeGet(mlirF32TypeGet(context));
+  case ScalarType::ComplexFloat:
+    return mlirComplexTypeGet(mlirF64TypeGet(context));
+  // Cannot support ScalarType::ComplexDouble because there is no MLIR C API
+  // to generate F128 types.
   default: {
     return {nullptr};
   }
@@ -114,14 +123,27 @@ static MlirType mapCustomClassType(MlirContext context, MlirLocation loc,
   throw mlir_diagnostic_emitted();
 }
 
-MlirType torch_mlir::getMlirTypeFromTorchType(MlirLocation loc,
-                                              const c10::TypePtr &torchType) {
+MlirType
+torch_mlir::getMlirTypeFromTorchType(MlirLocation loc,
+                                     const c10::TypePtr &torchType,
+                                     const ImportOptions &importOptions) {
   MlirContext context = mlirLocationGetContext(loc);
   using c10::TypeKind;
   auto kind = torchType->kind();
   switch (kind) {
   case TypeKind::TensorType: {
     auto tensorType = torchType->cast<c10::TensorType>();
+    auto getMlirTensorType = importOptions.assumeTensorsHaveValueSemantics
+                                 ? torchMlirTorchValueTensorTypeGet
+                                 : torchMlirTorchNonValueTensorTypeGet;
+
+    if (importOptions.ignoreExistingTensorShapesAndDtypes) {
+      return getMlirTensorType(context,
+                               /*numSizes=*/-1,
+                               /*optionalSizes=*/nullptr,
+                               /*optionalDtype=*/{nullptr});
+    }
+
     // Element type.
     MlirType elementType = {nullptr};
     if (tensorType->scalarType()) {
@@ -134,11 +156,11 @@ MlirType torch_mlir::getMlirTypeFromTorchType(MlirLocation loc,
     auto &sizes = tensorType->symbolic_sizes();
     if (!sizes.rank()) {
       // Unranked.
-      return torchMlirTorchNonValueTensorTypeGet(context,
-                                                 /*numSizes=*/0,
-                                                 /*optionalSizes=*/nullptr,
-                                                 /*optionalDtype=*/
-                                                 elementType);
+      return getMlirTensorType(context,
+                               /*numSizes=*/-1,
+                               /*optionalSizes=*/nullptr,
+                               /*optionalDtype=*/
+                               elementType);
     }
     // Ranked with possibly dynamic dims.
     auto &symbolicShape = tensorType->symbolic_sizes();
@@ -148,10 +170,17 @@ MlirType torch_mlir::getMlirTypeFromTorchType(MlirLocation loc,
       auto shapeSymbol = symbolicShape[i];
       dims[i] = shapeSymbol.is_static() ? shapeSymbol.static_size() : -1;
     }
-    return torchMlirTorchNonValueTensorTypeGet(context, dims.size(),
-                                               /*optionalSizes=*/dims.data(),
-                                               /*optionalDtype=*/
-                                               elementType);
+
+    // `std::vector`'s `.data()` method can return nullptr when the
+    // size is 0. This triggers the "nothing known about sizes" case in
+    // the C API constructor, when we want the "we know we have 0 sizes"
+    // case. So use a dummy data pointer.
+    int64_t dummy;
+    int64_t *dimsData = dims.size() == 0 ? &dummy : dims.data();
+    return getMlirTensorType(context, dims.size(),
+                             /*optionalSizes=*/dimsData,
+                             /*optionalDtype=*/
+                             elementType);
   }
   case TypeKind::IntType: {
     return torchMlirTorchIntTypeGet(context);
@@ -170,26 +199,38 @@ MlirType torch_mlir::getMlirTypeFromTorchType(MlirLocation loc,
   }
   case TypeKind::OptionalType: {
     return torchMlirTorchOptionalTypeGet(getMlirTypeFromTorchType(
-        loc, torchType->cast<c10::OptionalType>()->getElementType()));
+        loc, torchType->cast<c10::OptionalType>()->getElementType(),
+        importOptions));
   }
   case TypeKind::TupleType: {
     std::vector<MlirType> containedTypes;
     for (const c10::TypePtr &type :
          torchType->cast<c10::TupleType>()->containedTypes()) {
-      containedTypes.push_back(getMlirTypeFromTorchType(loc, type));
+      containedTypes.push_back(
+          getMlirTypeFromTorchType(loc, type, importOptions));
     }
     return torchMlirTorchTupleTypeGet(context, containedTypes.size(),
                                       containedTypes.data());
   }
+  case TypeKind::UnionType: {
+    std::vector<MlirType> containedTypes;
+    for (const c10::TypePtr &type :
+         torchType->cast<c10::UnionType>()->containedTypes()) {
+      containedTypes.push_back(getMlirTypeFromTorchType(loc, type));
+    }
+    return torchMlirTorchUnionTypeGet(context, containedTypes.size(),
+                                      containedTypes.data());
+  }
   case TypeKind::ListType: {
     return torchMlirTorchListTypeGet(getMlirTypeFromTorchType(
-        loc, torchType->cast<c10::ListType>()->getElementType()));
+        loc, torchType->cast<c10::ListType>()->getElementType(),
+        importOptions));
   }
   case TypeKind::DictType: {
     auto dictType = torchType->cast<c10::DictType>();
     return torchMlirTorchDictTypeGet(
-        getMlirTypeFromTorchType(loc, dictType->getKeyType()),
-        getMlirTypeFromTorchType(loc, dictType->getValueType()));
+        getMlirTypeFromTorchType(loc, dictType->getKeyType(), importOptions),
+        getMlirTypeFromTorchType(loc, dictType->getValueType(), importOptions));
   }
   case TypeKind::NoneType: {
     return torchMlirTorchNoneTypeGet(context);
@@ -224,10 +265,11 @@ MlirType torch_mlir::getMlirTypeFromTorchType(MlirLocation loc,
 
 MlirType
 torch_mlir::getFunctionTypeFromSchema(MlirContext context,
-                                      const c10::FunctionSchema &schema) {
+                                      const c10::FunctionSchema &schema,
+                                      const ImportOptions &importOptions) {
   MlirLocation loc = mlirLocationUnknownGet(context);
   auto mapType = [&](const c10::TypePtr &torchType) {
-    MlirType type = getMlirTypeFromTorchType(loc, torchType);
+    MlirType type = getMlirTypeFromTorchType(loc, torchType, importOptions);
     if (mlirTypeIsNull(type)) {
       std::stringstream msg;
       msg << "unsupported type in function schema: '"
@@ -285,7 +327,8 @@ MlirAttribute torch_mlir::convertTensorToMlirElementsAttr(at::Tensor tensor,
   // TODO: Support bool tensors.
   // TODO: More import formats in C-API.
   auto numElements = tensor.numel();
-  auto tensorData = tensor.data_ptr();
+  auto tensor_cpu = tensor.cpu().contiguous();
+  auto tensorData = tensor_cpu.data_ptr();
   switch (tensor.scalar_type()) {
   case ScalarType::Int:
     return mlirDenseElementsAttrInt32Get(
@@ -310,6 +353,22 @@ MlirAttribute torch_mlir::convertTensorToMlirElementsAttr(at::Tensor tensor,
   case ScalarType::QInt8:
     return mlirDenseElementsAttrInt8Get(
         shapedType, numElements, static_cast<const int8_t *>(tensorData));
+  case ScalarType::QUInt8:
+    return mlirDenseElementsAttrUInt8Get(
+        shapedType, numElements, static_cast<const uint8_t *>(tensorData));
+  case ScalarType::BFloat16:
+    return mlirDenseElementsAttrBFloat16Get(
+        shapedType, numElements, static_cast<const uint16_t *>(tensorData));
+  case ScalarType::Half:
+    return mlirDenseElementsAttrFloat16Get(
+        shapedType, numElements, static_cast<const uint16_t *>(tensorData));
+  case ScalarType::Byte:
+    return mlirDenseElementsAttrUInt8Get(
+        shapedType, numElements, static_cast<const uint8_t *>(tensorData));
+  case ScalarType::Char:
+    return mlirDenseElementsAttrInt8Get(
+        shapedType, numElements, static_cast<const int8_t *>(tensorData));
+
   default:
     throwUnsupportedTensorError();
   }
@@ -357,10 +416,11 @@ MlirLocation torch_mlir::getMlirLocationFromNode(MlirContext context,
 
 std::vector<MlirType>
 torch_mlir::getMlirTypesFromValues(MlirLocation loc,
-                                   c10::ArrayRef<torch::jit::Value *> values) {
+                                   c10::ArrayRef<torch::jit::Value *> values,
+                                   const ImportOptions &importOptions) {
   std::vector<MlirType> ret;
   for (auto value : values) {
-    MlirType t = getMlirTypeFromTorchType(loc, value->type());
+    MlirType t = getMlirTypeFromTorchType(loc, value->type(), importOptions);
     if (mlirTypeIsNull(t))
       throw mlir_diagnostic_emitted("unsupported type");
     ret.push_back(t);
@@ -368,24 +428,34 @@ torch_mlir::getMlirTypesFromValues(MlirLocation loc,
   return ret;
 }
 
-std::vector<MlirValue>
-torch_mlir::derefineValues(c10::ArrayRef<MlirValue> values,
-                           c10::ArrayRef<MlirType> expectedTypes,
-                           MlirLocation loc, MlirBlock appendToBlock) {
+std::vector<MlirValue> torch_mlir::adjustStaticInformationForValues(
+    MlirBlock appendToBlock, MlirLocation loc, c10::ArrayRef<MlirValue> values,
+    c10::ArrayRef<MlirType> desiredTypes, bool userAllowsRefinement) {
   std::vector<MlirValue> ret;
-  assert(values.size() == expectedTypes.size());
+  assert(values.size() == desiredTypes.size());
   for (int i = 0, e = values.size(); i != e; i++) {
     MlirValue value = values[i];
-    MlirType expectedType = expectedTypes[i];
+    MlirType expectedType = desiredTypes[i];
     MlirType type = mlirValueGetType(value);
-    if (mlirTypeEqual(expectedType, type)) {
-      // No need to derefine.
-      ret.push_back(value);
-    } else {
-      MlirOperation operation = createMlirOperationAtEnd(
-          appendToBlock, "torch.derefine", loc, expectedType, value);
-      ret.push_back(mlirOperationGetResult(operation, 0));
+    MlirValue adjusted = torchMlirAdjustStaticInformation(
+        appendToBlock, mlirBlockGetTerminator(appendToBlock), value,
+        expectedType, userAllowsRefinement);
+    if (!mlirValueIsNull(adjusted)) {
+      ret.push_back(adjusted);
+      continue;
     }
+
+    std::stringstream msg;
+    MlirStringCallback printToStream = +[](MlirStringRef str, void *userData) {
+      std::stringstream *stream = static_cast<std::stringstream *>(userData);
+      stream->write(str.data, str.length);
+    };
+    msg << "unhandled: could not adjust static info for type from ";
+    mlirTypePrint(type, printToStream, static_cast<void *>(&msg));
+    msg << " to type ";
+    mlirTypePrint(expectedType, printToStream, static_cast<void *>(&msg));
+    mlirEmitError(loc, msg.str().c_str());
+    throw mlir_diagnostic_emitted();
   }
   return ret;
 }

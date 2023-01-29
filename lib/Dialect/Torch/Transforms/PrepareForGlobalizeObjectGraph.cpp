@@ -9,8 +9,7 @@
 
 #include "PassDetail.h"
 
-#include "mlir/Dialect/StandardOps/IR/Ops.h"
-#include "mlir/IR/BlockAndValueMapping.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Transforms/DialectConversion.h"
@@ -31,17 +30,17 @@ public:
   LogicalResult matchAndRewrite(PrimCallMethodOp op,
                                 PatternRewriter &rewriter) const override {
     auto classType = symbolTable.lookup<ClassTypeOp>(
-        op.receiver().getType().cast<NnModuleType>().getClassName());
+        op.getReceiver().getType().cast<NnModuleType>().getClassName());
     assert(classType && "malformed module -- missing ClassTypeOp");
-    FuncOp func;
+    func::FuncOp func;
     for (auto method : classType.getOps<MethodOp>()) {
-      if (method.name() == op.name()) {
-        func = symbolTable.lookup<FuncOp>(method.function());
+      if (method.getName() == op.getName()) {
+        func = symbolTable.lookup<func::FuncOp>(method.getFunction());
         break;
       }
     }
     assert(func);
-    rewriter.replaceOpWithNewOp<CallOp>(op, func, op->getOperands());
+    rewriter.replaceOpWithNewOp<func::CallOp>(op, func, op->getOperands());
     return success();
   }
 
@@ -51,10 +50,10 @@ private:
 } // namespace
 
 namespace {
-class EraseUnusedConstantOp : public OpRewritePattern<ConstantOp> {
+class EraseUnusedConstantOp : public OpRewritePattern<func::ConstantOp> {
 public:
   using OpRewritePattern::OpRewritePattern;
-  LogicalResult matchAndRewrite(ConstantOp op,
+  LogicalResult matchAndRewrite(func::ConstantOp op,
                                 PatternRewriter &rewriter) const override {
     if (op.use_empty()) {
       rewriter.eraseOp(op);
@@ -76,7 +75,7 @@ class PrepareForGlobalizeObjectGraphPass
     MLIRContext *context = &getContext();
     RewritePatternSet patterns(context);
     patterns.add<ConvertPrimCallMethodToCall>(context, symbolTable);
-    CallIndirectOp::getCanonicalizationPatterns(patterns, context);
+    func::CallIndirectOp::getCanonicalizationPatterns(patterns, context);
     patterns.add<EraseUnusedConstantOp>(context);
 
     // Use applyPatternsAndFoldGreedily because the CallIndirectOp folding
@@ -94,9 +93,9 @@ class PrepareForGlobalizeObjectGraphPass
     // to the form we want.
     ConversionTarget target(*context);
     target.addIllegalOp<PrimCallMethodOp>();
-    target.addDynamicallyLegalOp<ConstantOp>(
-        [](ConstantOp op) { return !op.getType().isa<FunctionType>(); });
-    target.addIllegalOp<CallIndirectOp>();
+    target.addDynamicallyLegalOp<func::ConstantOp>(
+        [](func::ConstantOp op) { return !op.getType().isa<FunctionType>(); });
+    target.addIllegalOp<func::CallIndirectOp>();
     target.markUnknownOpDynamicallyLegal([](Operation *) { return true; });
 
     RewritePatternSet dummyPatterns(context);

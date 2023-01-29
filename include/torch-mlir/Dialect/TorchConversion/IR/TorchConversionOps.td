@@ -18,7 +18,7 @@ include "torch-mlir/Dialect/Torch/IR/TorchTypes.td"
 include "torch-mlir/Dialect/TorchConversion/IR/TorchConversionBase.td"
 
 class TorchConversion_Op<string mnemonic, list<Trait> traits = []>
-    : Op<TorchConversion_Dialect, mnemonic, traits> {
+    : Op<TorchConversion_Dialect, mnemonic, !listconcat(traits, [Pure])> {
 }
 
 //===----------------------------------------------------------------------===//
@@ -42,6 +42,7 @@ def TorchConversion_ToBuiltinTensorOp : TorchConversion_Op<"to_builtin_tensor", 
   let assemblyFormat = [{
     $operand attr-dict `:` qualified(type($operand)) `->` qualified(type($result))
   }];
+  let hasVerifier = 1;
 }
 
 def TorchConversion_FromBuiltinTensorOp : TorchConversion_Op<"from_builtin_tensor">
@@ -60,6 +61,7 @@ def TorchConversion_FromBuiltinTensorOp : TorchConversion_Op<"from_builtin_tenso
   let assemblyFormat = [{
     $operand attr-dict `:` qualified(type($operand)) `->` qualified(type($result))
   }];
+  let hasVerifier = 1;
 }
 
 def TorchConversion_ToI1Op : TorchConversion_Op<"to_i1", [
@@ -114,6 +116,7 @@ def TorchConversion_ToI64Op : TorchConversion_Op<"to_i64", [
   let assemblyFormat = [{
     $operand attr-dict
   }];
+  let hasFolder = 1;
 }
 
 def TorchConversion_FromI64Op : TorchConversion_Op<"from_i64", [
@@ -132,6 +135,7 @@ def TorchConversion_FromI64Op : TorchConversion_Op<"from_i64", [
   let assemblyFormat = [{
     $operand attr-dict
   }];
+  let hasFolder = 1;
 }
 
 def TorchConversion_ToF64Op : TorchConversion_Op<"to_f64", [
@@ -150,6 +154,7 @@ def TorchConversion_ToF64Op : TorchConversion_Op<"to_f64", [
   let assemblyFormat = [{
     $operand attr-dict
   }];
+  let hasFolder = 1;
 }
 
 def TorchConversion_FromF64Op : TorchConversion_Op<"from_f64", [
@@ -168,6 +173,7 @@ def TorchConversion_FromF64Op : TorchConversion_Op<"from_f64", [
   let assemblyFormat = [{
     $operand attr-dict
   }];
+  let hasFolder = 1;
 }
 
 def TorchConversion_I64ToGeneratorOp : TorchConversion_Op<"i64_to_generator", [
@@ -206,7 +212,11 @@ def TorchConversion_GeneratorToI64Op : TorchConversion_Op<"generator_to_i64", [
   }];
 }
 
-def TorchConversion_GetNextSeedOp: TorchConversion_Op<"get_next_seed", [
+class TorchConversionWithSideEffect_Op<string mnemonic, list<Trait> traits = []>
+    : Op<TorchConversion_Dialect, mnemonic, traits> {
+}
+
+def TorchConversion_GetNextSeedOp: TorchConversionWithSideEffect_Op<"get_next_seed", [
     DeclareOpInterfaceMethods<InferTypeOpInterface>,
   ]> {
   let summary = "Get the next global seed";

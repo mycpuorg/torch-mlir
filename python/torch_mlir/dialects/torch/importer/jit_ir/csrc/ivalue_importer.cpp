@@ -21,8 +21,7 @@
 #include "mlir-c/Diagnostics.h"
 #include "torch-mlir-c/TorchTypes.h"
 
-#include "ATen/native/quantized/cpu/packed_params.h"
-#include "caffe2/core/scope_guard.h"
+#include "ATen/native/quantized/PackedParams.h"
 
 using namespace torch_mlir;
 
@@ -101,8 +100,9 @@ namespace {
 class IValueImporter {
 public:
   IValueImporter(MlirBlock importBlock, MlirContext context,
-                 ClassAnnotator &annotator)
-      : importBlock(importBlock), context(context), annotator(annotator) {}
+                 ClassAnnotator &annotator, const ImportOptions &importOptions)
+      : importBlock(importBlock), context(context), annotator(annotator),
+        importOptions(importOptions) {}
 
   MlirValue importIValue(c10::IValue ivalue);
 
@@ -118,6 +118,7 @@ private:
   MlirBlock importBlock;
   MlirContext context;
   ClassAnnotator &annotator;
+  const ImportOptions &importOptions;
 
   // Map tracking already-imported values.
   std::unordered_map<c10::IValue, MlirValue, IValueHasher, IValueEq> valueMap;
@@ -151,6 +152,22 @@ private:
 };
 } // namespace
 
+// RAII pattern to insert an operation before going out of scope.
+class InserterGuard {
+private:
+  MlirBlock importBlock;
+  MlirOperation nnModule;
+
+public:
+  InserterGuard(MlirBlock importBlock, MlirOperation nnModule)
+      : importBlock(importBlock), nnModule(nnModule) {}
+
+  ~InserterGuard() {
+    mlirBlockInsertOwnedOperationBefore(
+        importBlock, mlirBlockGetTerminator(importBlock), nnModule);
+  }
+};
+
 MlirValue IValueImporter::importModule(torch::jit::Module currentModule) {
   // TODO: Can we do better?
   MlirLocation loc = mlirLocationUnknownGet(context);
@@ -175,10 +192,7 @@ MlirValue IValueImporter::importModule(torch::jit::Module currentModule) {
   MlirRegion nnModuleRegion = mlirOperationGetRegion(nnModule, 0);
   mlirRegionAppendOwnedBlock(nnModuleRegion, mlirBlockCreate(0, nullptr, nullptr));
   MlirBlock nnModuleBody = mlirRegionGetFirstBlock(nnModuleRegion);
-  auto inserter = caffe2::MakeGuard([&]() {
-    mlirBlockInsertOwnedOperationBefore(
-        importBlock, mlirBlockGetTerminator(importBlock), nnModule);
-  });
+  InserterGuard inserterGuard(importBlock, nnModule);
 
   if (!rootModuleName.has_value()) {
     rootModuleName = moduleTypeName;
@@ -274,7 +288,7 @@ MlirValue IValueImporter::rawImportIValue(c10::IValue ivalue) {
     MlirOperation operation = createMlirOperationAtEnd(
         importBlock, "torch.prim.ListConstruct", loc,
         torchMlirTorchListTypeGet(
-            getMlirTypeFromTorchType(loc, list.elementType())),
+            getMlirTypeFromTorchType(loc, list.elementType(), importOptions)),
         elems);
     return mlirOperationGetResult(operation, 0);
   }
@@ -289,8 +303,8 @@ MlirValue IValueImporter::rawImportIValue(c10::IValue ivalue) {
     MlirOperation operation = createMlirOperationAtEnd(
         importBlock, "torch.prim.DictConstruct", loc,
         torchMlirTorchDictTypeGet(
-            getMlirTypeFromTorchType(loc, dict.keyType()),
-            getMlirTypeFromTorchType(loc, dict.valueType())),
+            getMlirTypeFromTorchType(loc, dict.keyType(), importOptions),
+            getMlirTypeFromTorchType(loc, dict.valueType(), importOptions)),
         keys, values);
     return mlirOperationGetResult(operation, 0);
   }
@@ -366,10 +380,20 @@ MlirValue IValueImporter::importTensor(c10::IValue ivalue) {
   at::Tensor tensor = ivalue.toTensor().contiguous();
   MlirAttribute denseElements = convertTensorToMlirElementsAttr(tensor, loc);
 
-  MlirOperation tensorOp = createMlirOperationAtEnd(
-      importBlock, "torch.tensor.literal", loc,
-      torchMlirTorchNonValueTensorTypeGetFromAttribute(denseElements),
-      toMlirNamedAttribute("value", denseElements));
+  MlirOperation tensorOp;
+
+  if (importOptions.assumeTensorsHaveValueSemantics) {
+    tensorOp = createMlirOperationAtEnd(
+        importBlock, "torch.vtensor.literal", loc,
+        torchMlirTorchValueTensorTypeGetFromAttribute(denseElements),
+        toMlirNamedAttribute("value", denseElements));
+  } else {
+    tensorOp = createMlirOperationAtEnd(
+        importBlock, "torch.tensor.literal", loc,
+        torchMlirTorchNonValueTensorTypeGetFromAttribute(denseElements),
+        toMlirNamedAttribute("value", denseElements));
+  }
+
   MlirValue tensorReprValue = mlirOperationGetResult(tensorOp, 0);
 
   // Construct the complete tensor value. This is trivial for most tensors, but
@@ -382,9 +406,16 @@ MlirValue IValueImporter::importTensor(c10::IValue ivalue) {
     // compiler stages that are building a statically modeled quantization
     // representation will need to convert this to their representation.
     std::vector<int64_t> shape(tensor.sizes().begin(), tensor.sizes().end());
-    MlirType quantizedTensorType = torchMlirTorchNonValueTensorTypeGet(
-        context, shape.size(), shape.data(),
-        getMlirTypeForTorchScalarType(loc, tensor.scalar_type()));
+    MlirType quantizedTensorType;
+    if (importOptions.assumeTensorsHaveValueSemantics) {
+      quantizedTensorType = torchMlirTorchValueTensorTypeGet(
+          context, shape.size(), shape.data(),
+          getMlirTypeForTorchScalarType(loc, tensor.scalar_type()));
+    } else {
+      quantizedTensorType = torchMlirTorchNonValueTensorTypeGet(
+          context, shape.size(), shape.data(),
+          getMlirTypeForTorchScalarType(loc, tensor.scalar_type()));
+    }
     if (tensor.qscheme() == c10::kPerTensorAffine) {
       MlirValue qScale = importIValue(c10::IValue(tensor.q_scale()));
       MlirValue zeroPoint = importIValue(c10::IValue(tensor.q_zero_point()));
@@ -461,7 +492,7 @@ void IValueImporter::importClassType(c10::ClassType *classType) {
             "name", mlirStringAttrGet(
                         context, toMlirStringRef(classAttribute.getName()))),
         toMlirNamedAttribute("type", mlirTypeAttrGet(getMlirTypeFromTorchType(
-                                         loc, classAttribute.getType()))),
+                                         loc, classAttribute.getType(), importOptions))),
         isPrivate);
   }
 
@@ -503,7 +534,8 @@ void IValueImporter::importCompilationUnit(torch::jit::CompilationUnit *cu) {
     MethodAnnotation *annotation =
         annotator.getMethodAnnotationForFunction(function);
     MlirOperation func = importJitFunctionAsFuncOp(
-        context, function, [&](int argIndex) -> MlirAttribute {
+        context, function,
+        [&](int argIndex) -> MlirAttribute {
           if (!annotation || !annotation->argAnnotations.has_value()) {
             return {nullptr};
           }
@@ -541,7 +573,8 @@ void IValueImporter::importCompilationUnit(torch::jit::CompilationUnit *cu) {
           MlirNamedAttribute typeBoundAttr = toMlirNamedAttribute(
               "torch.type_bound", mlirTypeAttrGet(typeBound));
           return mlirDictionaryAttrGet(context, 1, &typeBoundAttr);
-        });
+        },
+        importOptions);
     // For IValue importing, the logical linkage structure of the module
     // is determined by the object graph.
     //
@@ -560,10 +593,12 @@ void IValueImporter::importCompilationUnit(torch::jit::CompilationUnit *cu) {
 }
 
 MlirValue torch_mlir::importIValue(c10::IValue ivalue, MlirBlock block,
-                              MlirContext context, ClassAnnotator &annotator) {
+                                   MlirContext context,
+                                   ClassAnnotator &annotator,
+                                   const ImportOptions &importOptions) {
   // When debugging module importing, it can be useful to dump as so:
   // if (ivalue.isModule())
   //   ivalue.toModule().dump(true, false, false);
-  IValueImporter importer(block, context, annotator);
+  IValueImporter importer(block, context, annotator, importOptions);
   return importer.importIValue(ivalue);
 }

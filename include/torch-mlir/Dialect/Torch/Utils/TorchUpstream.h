@@ -21,9 +21,62 @@
 // original PyTorch license and the code here should not be mixed with "code
 // that we [Torch-MLIR] write".
 
+// Note: As a coding convention, we should never `using` the `torch_upstream`
+// namespace. This is to ensure that at a glance from the code, it is clear
+// that we are referencing upstream types.
+
 namespace mlir {
 namespace torch {
 namespace torch_upstream {
+
+//===----------------------------------------------------------------------===//
+// TypeKind related enum related code are copied from
+// https://github.com/pytorch/pytorch/blob/master/aten/src/ATen/core/jit_type_base.h
+//===----------------------------------------------------------------------===//
+#define C10_FORALL_TYPES(_)                                                    \
+  _(AnyType)                                                                   \
+  _(EnumType)                                                                  \
+  _(AnyEnumType)                                                               \
+  _(TensorType)                                                                \
+  _(StorageType)                                                               \
+  _(TupleType)                                                                 \
+  _(ListType)                                                                  \
+  _(DictType)                                                                  \
+  _(NumberType)                                                                \
+  _(FloatType)                                                                 \
+  _(ComplexType)                                                               \
+  _(FutureType)                                                                \
+  _(RRefType)                                                                  \
+  _(IntType)                                                                   \
+  _(NoneType)                                                                  \
+  _(StringType)                                                                \
+  _(GeneratorType)                                                             \
+  _(QuantizerType)                                                             \
+  _(BoolType)                                                                  \
+  _(OptionalType)                                                              \
+  _(VarType)                                                                   \
+  _(DeviceObjType)                                                             \
+  _(StreamObjType)                                                             \
+  _(FunctionType)                                                              \
+  _(ClassType)                                                                 \
+  _(PyObjectType)                                                              \
+  _(CapsuleType)                                                               \
+  _(InterfaceType)                                                             \
+  _(QSchemeType)                                                               \
+  _(LayoutType)                                                                \
+  _(ScalarTypeType)                                                            \
+  _(AnyListType)                                                               \
+  _(AnyTupleType)                                                              \
+  _(AnyClassType)                                                              \
+  _(SymIntType)                                                                \
+  _(UnionType)                                                                 \
+  _(DynamicType)
+
+enum class TypeKind {
+#define DEFINE_TYPE(T) T,
+  C10_FORALL_TYPES(DEFINE_TYPE)
+#undef DEFINE_TYPE
+};
 
 //===----------------------------------------------------------------------===//
 // ScalarType enum related code are copied from c10/core/ScalarType.h
@@ -80,6 +133,32 @@ ScalarType promote_skip_undefined(ScalarType a, ScalarType b);
 // https://github.com/pytorch/pytorch/blob/master/aten/src/ATen/core/Reduction.h
 //===----------------------------------------------------------------------===//
 enum Reduction { None, Mean, Sum, END };
+
+//===----------------------------------------------------------------------===//
+// Possible values for `memory_format` argument in PyTorch ops that support it.
+// Source:
+// https://github.com/pytorch/pytorch/blob/master/c10/core/MemoryFormat.h
+//===----------------------------------------------------------------------===//
+enum MemoryFormat {
+  Contiguous,
+  Preserve,
+  ChannelsLast,
+  ChannelsLast3d
+};
+
+//===----------------------------------------------------------------------===//
+// Possible values for `layout` argument in PyTorch ops that support it.
+// Source:
+// https://github.com/pytorch/pytorch/blob/master/c10/core/Layout.h
+//===----------------------------------------------------------------------===//
+enum Layout { Strided, Sparse, SparseCsr, Mkldnn, NumOptions };
+
+//===----------------------------------------------------------------------===//
+// Possible value for `EmbeddingBag Mode` argument for Embedding bag ops.
+// Source:
+// https://github.com/llvm/torch-mlir/blob/main/include/torch-mlir/Dialect/Torch/Utils/TorchUpstream.h
+//===-----------------------------------------------------------------------===//
+enum EmbeddingBagMode { MODE_SUM, MODE_MEAN, MODE_MAX };
 
 } // namespace torch_upstream
 } // namespace torch
