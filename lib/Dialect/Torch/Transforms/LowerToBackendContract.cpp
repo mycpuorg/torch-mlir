@@ -197,6 +197,24 @@ static bool satisfiesBackendContract(ModuleOp module,
   if (walkResult0.wasInterrupted())
     return false;
 
+  // Check for unimplemented operators first to give more direct diagnostics.
+  walkResult0 = module.walk([&](Torch::OperatorOp op) {
+    if (llvm::all_of(op.getResults(), [&op](auto res) {
+          return succeeded(
+              checkType(op.getOperation(), res.getType(), /*actuallyEmitDiagnostics=*/false));
+        })) {
+      return WalkResult::advance();
+    }
+
+    if (actuallyEmitDiagnostics) {
+      op->emitError("unsupported by backend contract: Unimplemented operator '"
+        + op.getName() + "'");
+    }
+    return WalkResult::interrupt();
+  });
+  if (walkResult0.wasInterrupted())
+    return false;
+
   // Check all the types of all Value's in the program and the legality of all
   // the ops.
   //
@@ -342,6 +360,7 @@ static void markDecomposedOpsAsIllegal(MLIRContext *context,
   target.addIllegalOp<AtenEmptyLikeOp>();
   target.addIllegalOp<AtenOnesLikeOp>();
   target.addIllegalOp<AtenZerosLikeOp>();
+  target.addIllegalOp<AtenStackOp>();
   target.addIllegalOp<AtenRollOp>();
   target.addIllegalOp<AtenRepeatOp>();
   target.addIllegalOp<AtenExpandOp>();
@@ -349,6 +368,7 @@ static void markDecomposedOpsAsIllegal(MLIRContext *context,
   target.addIllegalOp<AtenWhereScalarOp>();
   target.addIllegalOp<AtenWhereScalarOtherOp>();
   target.addIllegalOp<AtenWhereScalarSelfOp>();
+  target.addIllegalOp<AtenMaskedFillScalarOp>();
   target.addIllegalOp<AtenConvolutionBackwardOverrideableOp>();
   target.addIllegalOp<AtenSizeOp>();
   target.addIllegalOp<AtenReshapeOp>();
@@ -357,6 +377,7 @@ static void markDecomposedOpsAsIllegal(MLIRContext *context,
   target.addIllegalOp<AtenAddmmOp>();
   target.addIllegalOp<AtenMeanOp>();
   target.addIllegalOp<AtenMeanDimOp>();
+  target.addIllegalOp<AtenNormScalarOptDimOp>();
   target.addIllegalOp<AtenSelectIntOp>();
   target.addIllegalOp<AtenMvOp>();
   target.addIllegalOp<AtenTOp>();
@@ -389,6 +410,7 @@ static void markDecomposedOpsAsIllegal(MLIRContext *context,
   target.addIllegalOp<Aten_ReshapeAliasOp>();
   target.addIllegalOp<AtenBernoulliOp>();
   target.addIllegalOp<ValsemVariantAtenBernoulliFloatOp>();
+  target.addIllegalOp<AtenBernoulliPOp>();
   target.addIllegalOp<AtenBernoulliTensorOp>();
   target.addIllegalOp<AtenZeroOp>();
   target.addIllegalOp<AtenRandLikeOp>();

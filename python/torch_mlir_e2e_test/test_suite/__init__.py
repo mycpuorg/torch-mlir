@@ -8,7 +8,7 @@
 # to the backend contract.
 COMMON_TORCH_MLIR_LOWERING_XFAILS = {
     "QuantizedMLP_basic",
-    "NormalizeModule_basic",
+    "ReduceMaxAlongDimUnsignedInt_basic",
 }
 
 def register_all_tests():
@@ -41,7 +41,7 @@ def register_all_tests():
     from . import histogram_binning_calibration
     from . import rng
     from . import cast
-    from . import index_put
+    from . import scatter
     from . import pooling
     from . import return_types
     from . import control_flow

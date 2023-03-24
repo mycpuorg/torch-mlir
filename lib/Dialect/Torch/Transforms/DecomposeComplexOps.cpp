@@ -195,8 +195,8 @@ static FailureOr<Value> unsqueezeTensor(PatternRewriter &rewriter,
   } else {
     unsqueezedShape.resize(unsqueezedRank, kUnknownSize);
   }
-  Type unsqueezedType =
-      inputType.getWithSizesAndDtype(unsqueezedShape, inputType.getDtype());
+  Type unsqueezedType = inputType.getWithSizesAndDtype(
+      unsqueezedShape, inputType.getOptionalDtype());
   Value unsqueezed = rewriter.create<AtenUnsqueezeOp>(
       op->getLoc(), unsqueezedType, input, dim);
   return unsqueezed;
@@ -1055,6 +1055,50 @@ public:
 };
 } // namespace
 
+// Decompose `aten.stack` into `aten.unsqueeze` and `aten.cat`.
+namespace {
+class DecomposeAtenStackOp : public OpRewritePattern<AtenStackOp> {
+public:
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(AtenStackOp op,
+                                PatternRewriter &rewriter) const override {
+    SmallVector<Value> tensors;
+    if (!getListConstructElements(op.getTensors(), tensors)) {
+      return rewriter.notifyMatchFailure(
+          op, "unimplemented: the tensor list is not from list construct");
+    }
+    // Ensure all tensors have known sizes
+    for (Value tensor : tensors) {
+      BaseTensorType tensorType = tensor.getType().cast<BaseTensorType>();
+      if (!tensorType.hasSizes()) {
+        return rewriter.notifyMatchFailure(
+            op, "unimplemented: one tensor does not have known sizes");
+      }
+    }
+
+    SmallVector<Value> unsqueezedTensors;
+    for (Value tensor : tensors) {
+      auto unsqueezedInfo = unsqueezeTensor(rewriter, op, tensor, op.getDim());
+      if (failed(unsqueezedInfo)) {
+        return rewriter.notifyMatchFailure(
+            op, "cannot generate unsqueeze tensor op");
+      }
+      unsqueezedTensors.push_back(*unsqueezedInfo);
+    }
+
+    Type listElemType =
+        op.getType().cast<BaseTensorType>().getWithSizesAndDtype(
+            /*optionalSizes=*/std::nullopt, /*optionalDtype=*/nullptr);
+    Type listType = Torch::ListType::get(listElemType);
+    Value unsqueezedTensorList = rewriter.create<PrimListConstructOp>(
+        op.getLoc(), listType, unsqueezedTensors);
+    rewriter.replaceOpWithNewOp<AtenCatOp>(op, op.getType(),
+                                           unsqueezedTensorList, op.getDim());
+    return success();
+  }
+};
+} // namespace
+
 // Decompose aten.roll into aten.slice and aten.cat ops.
 // https://pytorch.org/docs/stable/generated/torch.roll.html
 namespace {
@@ -1390,6 +1434,25 @@ public:
 };
 } // namespace
 
+// Decompose aten.masked_fill.Scalar into aten.where.self op.
+namespace {
+class DecomposeAtenMaskedFillScalarOp
+    : public OpRewritePattern<AtenMaskedFillScalarOp> {
+public:
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(AtenMaskedFillScalarOp op,
+                                PatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    auto resType = op.getType().cast<BaseTensorType>();
+    Value mask = op.getMask();
+    Value value = createRank0Tensor(rewriter, loc, resType, op.getValue());
+    rewriter.replaceOpWithNewOp<AtenWhereSelfOp>(op, resType, mask,
+                                                 value, op.getSelf());
+    return success();
+  }
+};
+
+} // namespace
 // Decompose aten.convolution_overrideable to aten.convolution op.
 namespace {
 class DecomposeAtenConvolutionOverrideableOp
@@ -2141,16 +2204,16 @@ public:
 // aten.bernoulli.float(x, p) = (randLike(float(x)) < tensor(p)).cast(type(x)).
 // Since the input x can be an integer tensor, it's important to cast it to
 // float type before passing it to the `aten.randLike` op.
-class DecomposeValsemVariantAtenBernoulliFloatOp
-    : public OpRewritePattern<ValsemVariantAtenBernoulliFloatOp> {
+template <typename BernoulliLikeOp>
+class DecomposeAtenBernoulliLikeOp : public OpRewritePattern<BernoulliLikeOp> {
 public:
-  using OpRewritePattern::OpRewritePattern;
-  LogicalResult matchAndRewrite(ValsemVariantAtenBernoulliFloatOp op,
+  using OpRewritePattern<BernoulliLikeOp>::OpRewritePattern;
+  LogicalResult matchAndRewrite(BernoulliLikeOp op,
                                 PatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     Value input = op.getSelf();
     Value p = op.getP();
-    if (!op.getGenerator().getType().isa<Torch::NoneType>())
+    if (!op.getGenerator().getType().template isa<Torch::NoneType>())
       return rewriter.notifyMatchFailure(
           op, "The generator has to ben None because only global default "
               "generator is supported");
@@ -3165,7 +3228,7 @@ class DecomposeAtenNumpyTOp : public OpRewritePattern<AtenNumpyTOp> {
 
 template <typename OpTy>
 static LogicalResult calculateVariance(OpTy op, PatternRewriter &rewriter,
-                                       bool unbiased, int64_t correction) {
+                                       bool unbiased, double correction) {
   Location loc = op.getLoc();
   Value self = op.getSelf();
   Value dimList = op.getDim();
@@ -3251,19 +3314,22 @@ static LogicalResult calculateVariance(OpTy op, PatternRewriter &rewriter,
     productDimSize =
         rewriter.create<AtenMulIntOp>(loc, productDimSize, dimSize);
   }
-  Value cstCorrection = rewriter.create<Torch::ConstantIntOp>(
-      loc, rewriter.getI64IntegerAttr(correction));
+  productDimSize = rewriter.create<AtenFloatScalarOp>(loc, productDimSize);
+  constantOne = rewriter.create<Torch::ConstantFloatOp>(
+      loc, rewriter.getF64FloatAttr(1.0));
+  Value cstCorrection = rewriter.create<Torch::ConstantFloatOp>(
+      loc, rewriter.getF64FloatAttr(correction));
   // The `correction` value should be less than or equal to `productDimSize +
   // 1`.
-  Value productDimSizePlusOne =
-      rewriter.create<AtenAddIntOp>(loc, productDimSize, constantOne);
+  Value productDimSizePlusOne = rewriter.create<AtenAddOp>(
+      loc, productDimSize.getType(), productDimSize, constantOne);
   Value cond =
-      rewriter.create<AtenGeIntOp>(loc, productDimSizePlusOne, cstCorrection);
+      rewriter.create<AtenGeFloatOp>(loc, productDimSizePlusOne, cstCorrection);
   rewriter.create<RuntimeAssertOp>(
       loc, cond,
       "correction value should be less than or equal to productDimSize + 1");
   Value productDimSizeSubCorrection =
-      rewriter.create<AtenSubIntOp>(loc, productDimSize, cstCorrection);
+      rewriter.create<AtenSubFloatOp>(loc, productDimSize, cstCorrection);
   Value result = rewriter.create<AtenDivScalarOp>(loc, newOutputType, squareSum,
                                                   productDimSizeSubCorrection);
   result =
@@ -3290,7 +3356,7 @@ public:
       return rewriter.notifyMatchFailure(
           op, "Only support constant unbiased for aten.var");
     }
-    int64_t correction = unbiased ? 1 : 0;
+    double correction = unbiased ? 1.0 : 0.0;
     if (failed(calculateVariance<AtenVarDimOp>(op, rewriter, unbiased,
                                                correction)))
       return rewriter.notifyMatchFailure(op, "invalid variance parameters");
@@ -3310,18 +3376,32 @@ public:
   using OpRewritePattern::OpRewritePattern;
   LogicalResult matchAndRewrite(AtenVarCorrectionOp op,
                                 PatternRewriter &rewriter) const override {
-    int64_t correction;
+    int64_t correctionValInt;
+    double correctionValFloat = 1.0;
     if (!op.getCorrection().getType().isa<Torch::NoneType>()) {
-      if (!matchPattern(op.getCorrection(), m_TorchConstantInt(&correction)))
+      if (op.getCorrection().getType().isa<Torch::FloatType>()) {
+        if (!matchPattern(op.getCorrection(),
+                          m_TorchConstantFloat(&correctionValFloat)))
+          return rewriter.notifyMatchFailure(
+              op, "Only support constant int or float correction value for "
+                  "aten.var");
+      } else if (op.getCorrection().getType().isa<Torch::IntType>()) {
+        if (!matchPattern(op.getCorrection(),
+                          m_TorchConstantInt(&correctionValInt)))
+          return rewriter.notifyMatchFailure(
+              op, "Only support constant int or float correction value for "
+                  "aten.var");
+        correctionValFloat = (double)correctionValInt;
+      } else {
         return rewriter.notifyMatchFailure(
-            op, "Only support constant int correction for aten.var");
-    } else {
-      // The default value in case of `correction` being None is 1.
-      correction = 1;
+            op, "unimplemented: correction value should be only constant int "
+                "or float for aten.var");
+      }
     }
-    bool unbiased = correction == 0 ? false : true;
+
+    bool unbiased = correctionValFloat == 0.0 ? false : true;
     if (failed(calculateVariance<AtenVarCorrectionOp>(op, rewriter, unbiased,
-                                                      correction)))
+                                                      correctionValFloat)))
       return rewriter.notifyMatchFailure(op, "invalid variance parameters");
     return success();
   }
@@ -3471,6 +3551,29 @@ public:
           loc, resultType, result, /*dim=*/cstNone, /*keepdim=*/cstFalse,
           /*dtype=*/cstNone);
     rewriter.replaceOp(op, result);
+    return success();
+  }
+};
+} // namespace
+
+namespace {
+// Decompose `aten.norm.ScalarOpt_dim` op to `aten.linalg_vector_norm` op
+class DecomposeAtenNormScalarOptDimOp
+    : public OpRewritePattern<AtenNormScalarOptDimOp> {
+public:
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(AtenNormScalarOptDimOp op,
+                                PatternRewriter &rewriter) const override {
+    Location loc = op->getLoc();
+    Value none = rewriter.create<Torch::ConstantNoneOp>(loc);
+    Value ord = op.getP();
+    if (ord.getType().isa<Torch::NoneType>()) {
+      ord = rewriter.create<Torch::ConstantFloatOp>(
+          loc, rewriter.getF64FloatAttr(2.0));
+    }
+    rewriter.replaceOpWithNewOp<AtenLinalgVectorNormOp>(
+        op, op.getType(), op.getSelf(), ord, op.getDim(), op.getKeepdim(),
+        /*dtype=*/none);
     return success();
   }
 };
@@ -3814,6 +3917,7 @@ public:
         DecomposeConstantTensorAllocLikeOp<AtenOnesLikeOp, 1>>(patterns);
     addPatternIfTargetOpIsIllegal<
         DecomposeConstantTensorAllocLikeOp<AtenZerosLikeOp, 0>>(patterns);
+    addPatternIfTargetOpIsIllegal<DecomposeAtenStackOp>(patterns);
     addPatternIfTargetOpIsIllegal<DecomposeAtenRollOp>(patterns);
     addPatternIfTargetOpIsIllegal<DecomposeAtenRepeatOp>(patterns);
     addPatternIfTargetOpIsIllegal<DecomposeAtenExpandOp>(patterns);
@@ -3821,6 +3925,7 @@ public:
     addPatternIfTargetOpIsIllegal<DecomposeAtenWhereScalarOp>(patterns);
     addPatternIfTargetOpIsIllegal<DecomposeAtenWhereScalarOtherOp>(patterns);
     addPatternIfTargetOpIsIllegal<DecomposeAtenWhereScalarSelfOp>(patterns);
+    addPatternIfTargetOpIsIllegal<DecomposeAtenMaskedFillScalarOp>(patterns);
     addPatternIfTargetOpIsIllegal<
         DecomposeAtenConvolutionBackwardOverrideableOp>(patterns);
     addPatternIfTargetOpIsIllegal<DecomposeAtenSizeOp>(patterns);
@@ -3863,8 +3968,11 @@ public:
     addPatternIfTargetOpIsIllegal<DecomposeAten_UnsafeViewOp>(patterns);
     addPatternIfTargetOpIsIllegal<DecomposeAten_ReshapeAliasOp>(patterns);
     addPatternIfTargetOpIsIllegal<DecomposeAtenBernoulliOp>(patterns);
-    addPatternIfTargetOpIsIllegal<DecomposeValsemVariantAtenBernoulliFloatOp>(
+    addPatternIfTargetOpIsIllegal<
+        DecomposeAtenBernoulliLikeOp<ValsemVariantAtenBernoulliFloatOp>>(
         patterns);
+    addPatternIfTargetOpIsIllegal<
+        DecomposeAtenBernoulliLikeOp<AtenBernoulliPOp>>(patterns);
     addPatternIfTargetOpIsIllegal<DecomposeAtenBernoulliTensorOp>(patterns);
     addPatternIfTargetOpIsIllegal<DecomposeAtenZeroOp>(patterns);
     addPatternIfTargetOpIsIllegal<DecomposeAtenRandLikeOp>(patterns);
@@ -3911,6 +4019,7 @@ public:
     addPatternIfTargetOpIsIllegal<DecomposeAtenIndexTensorHackedTwinOp>(
         patterns);
     addPatternIfTargetOpIsIllegal<DecomposeAtenMseLossOp>(patterns);
+    addPatternIfTargetOpIsIllegal<DecomposeAtenNormScalarOptDimOp>(patterns);
     addPatternIfTargetOpIsIllegal<DecomposeAtenRandintLowOp>(patterns);
     addPatternIfTargetOpIsIllegal<DecomposeAtenVarMeanCorrectionOp>(patterns);
     addPatternIfTargetOpIsIllegal<DecomposePrimsConvertElementTypeOp>(patterns);

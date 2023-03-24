@@ -89,7 +89,8 @@ def aten〇expm1〡shape(self: List[int]) -> List[int]:
     Invocation(ZeroDTensorWithDtype(torch.int32)),
     Invocation(ZeroDTensorWithDtype(torch.bool)),
 ])
-def aten〇expm1〡dtype(self_rank: int, self_dtype: int) -> int:
+def aten〇expm1〡dtype(self_rank_dtype: Tuple[int, int]) -> int:
+    self_rank, self_dtype = self_rank_dtype
     if self_dtype == torch.float64 or self_dtype == torch.bfloat16 or self_dtype == torch.float16:
         return self_dtype
     else:
@@ -141,6 +142,9 @@ def aten〇gelu_backward〡shape(grad_output: List[int], self: List[int], approx
     return upstream_shape_functions.unary(grad_output)
 
 def aten〇leaky_relu_backward〡shape(grad_output: List[int], self: List[int], negative_slope: float, self_is_result: bool) -> List[int]:
+    return upstream_shape_functions.unary(grad_output)
+
+def aten〇hardtanh_backward〡shape(grad_output: List[int], self: List[int], min_val: float, max_val: float) -> List[int]:
     return upstream_shape_functions.unary(grad_output)
 
 def aten〇ceil〡shape(self: List[int]) -> List[int]:
@@ -277,7 +281,8 @@ def aten〇rsub〇Scalar〡shape(self: List[int], other: float, alpha: float = 1
     Invocation(ZeroDTensorWithDtype(torch.int64), other=0.0),
     Invocation(ZeroDTensorWithDtype(torch.float16), other=0.0)
 ])
-def aten〇rsub〇Scalar〡dtype(self_rank: int, self_dtype: int, other: Union[int, float], alpha: Union[int, float] = 1) -> int:
+def aten〇rsub〇Scalar〡dtype(self_rank_dtype: Tuple[int, int], other: Union[int, float], alpha: Union[int, float] = 1) -> int:
+    self_rank, self_dtype = self_rank_dtype
     return promote_dtypes([self_rank, None], [self_dtype, get_dtype_of_scalar(other)])
 
 def aten〇leaky_relu〡shape(self: List[int], negative_slope: float = 0.01) -> List[int]:
@@ -313,16 +318,16 @@ def aten〇mean〡shape(self: List[int], dtype: Optional[int] = None) -> List[in
 def aten〇var〡shape(self: List[int], unbiased: bool = True) -> List[int]:
     return []
 
-def prims〇var〡shape(inp: List[int], dims: Optional[List[int]], correction: int, output_dtype: Optional[int] = None) -> List[int]:
+def prims〇var〡shape(inp: List[int], dims: Optional[List[int]], correction: float, output_dtype: Optional[int] = None) -> List[int]:
     return upstream_shape_functions.sum_mean_dim(inp, dims, False, None)
 
 def aten〇var〇dim〡shape(self: List[int], dim: Optional[List[int]], unbiased: bool = True, keepdim: bool = False) -> List[int]:
     return upstream_shape_functions.sum_mean_dim(self, dim, keepdim, None)
 
-def aten〇var〇correction〡shape(self: List[int], dim: Optional[List[int]] = None, correction: Optional[int] = None, keepdim: bool = False) -> List[int]:
+def aten〇var〇correction〡shape(self: List[int], dim: Optional[List[int]] = None, correction: Optional[float] = None, keepdim: bool = False) -> List[int]:
     return upstream_shape_functions.sum_mean_dim(self, dim, keepdim, None)
 
-def aten〇var_mean〇correction〡shape(self: List[int], dim: Optional[List[int]] = None, correction: Optional[int] = None, keepdim: bool = False) -> Tuple[List[int], List[int]]:
+def aten〇var_mean〇correction〡shape(self: List[int], dim: Optional[List[int]] = None, correction: Optional[float] = None, keepdim: bool = False) -> Tuple[List[int], List[int]]:
     out = upstream_shape_functions.sum_mean_dim(self, dim, keepdim, None)
     return out, out
 
@@ -335,7 +340,7 @@ def aten〇std〡shape(self: List[int], unbiased: bool = True) -> List[int]:
 def aten〇std〇dim〡shape(self: List[int], dim: Optional[List[int]], unbiased: bool = True, keepdim: bool = False) -> List[int]:
     return upstream_shape_functions.sum_mean_dim(self, dim, keepdim, None)
 
-def aten〇std〇correction〡shape(self: List[int], dim: Optional[List[int]] = None, correction: Optional[int] = None, keepdim: bool = False) -> List[int]:
+def aten〇std〇correction〡shape(self: List[int], dim: Optional[List[int]] = None, correction: Optional[float] = None, keepdim: bool = False) -> List[int]:
     return upstream_shape_functions.sum_mean_dim(self, dim, keepdim, None)
 
 def _reduce_along_dim(self: List[int], dim: int, keepdim: bool):
@@ -610,6 +615,9 @@ def aten〇bernoulli〇float〡shape(self: List[int], p: float = 0.5, generator:
 def aten〇bernoulli〇Tensor〡shape(self: List[int], p: List[int], generator: Any = None) -> List[int]:
     return self
 
+def aten〇bernoulli〇p〡shape(self: List[int], p: float, generator: Any = None) -> List[int]:
+    return self
+
 def aten〇_index_put_impl〡shape(self: List[int], indices: List[Optional[List[int]]], values: List[int], accumulate: bool = False, unsafe: bool = False) -> List[int]:
     return upstream_shape_functions.unary(self)
 
@@ -673,7 +681,9 @@ def aten〇floor_divide〡shape(self: List[int], other: List[int]) -> List[int]:
     Invocation(ZeroDTensorWithDtype(torch.float32), NonZeroDTensorWithDtype(torch.float64)),
     Invocation(NonZeroDTensorWithDtype(torch.float32), NonZeroDTensorWithDtype(torch.int32)),
 ])
-def aten〇floor_divide〡dtype(self_rank: int, self_dtype: int, other_rank: int, other_dtype: int) -> int:
+def aten〇floor_divide〡dtype(self_rank_dtype: Tuple[int, int], other_rank_dtype: Tuple[int, int]) -> int:
+    self_rank, self_dtype = self_rank_dtype
+    other_rank, other_dtype = other_rank_dtype
     ranks: List[Optional[int]] = [self_rank, other_rank]
     dtypes = [self_dtype, other_dtype]
     return promote_dtypes(ranks, dtypes)
@@ -813,6 +823,40 @@ def aten〇_convolution〡shape(input: List[int], weight: List[int], bias: Optio
 def aten〇_convolution〇deprecated〡shape(input: List[int], weight: List[int], bias: Optional[List[int]], stride: List[int], padding: List[int], dilation: List[int], transposed: bool, output_padding: List[int], groups: int, benchmark: bool, deterministic: bool, cudnn_enabled: bool) -> List[int]:
     return aten〇convolution〡shape(input, weight, bias, stride, padding, dilation, transposed, output_padding, groups)
 
+_convolution_deprecated_kwargs = {
+    "stride" : [1, 1], "padding" : [0, 0], "dilation" : [1, 1], "transposed" : False, "output_padding" : [0, 0],
+    "groups" : 1, "benchmark" : False, "deterministic" : False, "cudnn_enabled" : False}
+@check_dtype_function(
+    [Invocation(TensorOfShape(1, 1, 1, 1, dtype=torch.float32), TensorOfShape(1, 1, 1, 1, dtype=torch.float32), # Same type
+                TensorOfShape(1, dtype=torch.float32), **_convolution_deprecated_kwargs),
+     ErrorInvocation(TensorOfShape(1, 1, 1, 1, dtype=torch.int32), TensorOfShape(1, 1, 1, 1, dtype=torch.float32), # Different type
+                     TensorOfShape(1, dtype=torch.float32), **_convolution_deprecated_kwargs),
+     ErrorInvocation(TensorOfShape(1, 1, 1, 1, dtype=torch.bfloat16), TensorOfShape(1, 1, 1, 1, dtype=torch.float32), # Different width
+                     TensorOfShape(1, dtype=torch.float32), **_convolution_deprecated_kwargs),
+     ErrorInvocation(TensorOfShape(1, 1, 1, 1, dtype=torch.bfloat16), TensorOfShape(1, 1, 1, 1, dtype=torch.int32), # Different type and width
+                     TensorOfShape(1, dtype=torch.float32), **_convolution_deprecated_kwargs),
+     ErrorInvocation(TensorOfShape(1, 1, 1, 1, dtype=torch.complex64), TensorOfShape(1, 1, 1, 1, dtype=torch.float32),
+                     TensorOfShape(1, dtype=torch.float32), **_convolution_deprecated_kwargs),
+     ErrorInvocation(TensorOfShape(1, 1, 1, 1, dtype=torch.float32), TensorOfShape(1, 1, 1, 1, dtype=torch.complex128),
+                     TensorOfShape(1, dtype=torch.float32), **_convolution_deprecated_kwargs),
+     ErrorInvocation(TensorOfShape(1, 1, 1, 1, dtype=torch.bool), TensorOfShape(1, 1, 1, 1, dtype=torch.float32),
+                     TensorOfShape(1, dtype=torch.float32), **_convolution_deprecated_kwargs),
+     ErrorInvocation(TensorOfShape(1, 1, 1, 1, dtype=torch.float32), TensorOfShape(1, 1, 1, 1, dtype=torch.bool),
+                     TensorOfShape(1, dtype=torch.float32), **_convolution_deprecated_kwargs),
+     ErrorInvocation(TensorOfShape(1, 1, 1, 1, dtype=torch.float16), TensorOfShape(1, 1, 1, 1, dtype=torch.float32),
+                     TensorOfShape(1, dtype=torch.float32), **_convolution_deprecated_kwargs),
+     ErrorInvocation(TensorOfShape(1, 1, 1, 1, dtype=torch.float32), TensorOfShape(1, 1, 1, 1, dtype=torch.float16),
+                     TensorOfShape(1, dtype=torch.float32), **_convolution_deprecated_kwargs)
+])
+def aten〇_convolution〇deprecated〡dtype(input_rank_dtype: Tuple[int, int], weight_rank_dtype: Tuple[int, int], bias_rank_dtype: Optional[Tuple[int, int]], stride: List[int], padding: List[int], dilation: List[int], transposed: bool, output_padding: List[int], groups: int, benchmark: bool, deterministic: bool, cudnn_enabled: bool) -> int:
+    input_rank, input_dtype = input_rank_dtype
+    weight_rank, weight_dtype = weight_rank_dtype
+    assert input_dtype == weight_dtype
+    assert input_dtype not in [torch.bool, torch.float16, torch.complex64, torch.complex128]
+    ranks: List[Optional[int]] = [input_rank, weight_rank]
+    dtypes = [input_dtype, weight_dtype]
+    return promote_dtypes(ranks, dtypes)
+
 def aten〇flip〡shape(self: List[int], dims: List[int]) -> List[int]:
     return self
 
@@ -844,6 +888,9 @@ def aten〇select〇int〡shape(self: List[int], dim: int, index: int) -> List[i
     return upstream_shape_functions.select(self, dim, index)
 
 def aten〇select_scatter〡shape(self: List[int], src: List[int], dim: int, index: int) -> List[int]:
+    return self
+
+def aten〇scatter_reduce〇two〡shape(self: List[int], dim: int, index: List[int], src: List[int], reduce: str, include_self: bool = True) -> List[int]:
     return self
 
 def aten〇index_select〡shape(self: List[int], dim: int, index: List[int]) -> List[int]:
@@ -1006,6 +1053,9 @@ def aten〇index〇Tensor_hacked_twin〡shape(self: List[int], indices: List[Lis
 def aten〇cat〡shape(tensors: List[List[int]], dim: int = 0) -> List[int]:
     return upstream_shape_functions.cat(tensors, dim)
 
+def aten〇stack〡shape(tensors: List[List[int]], dim: int = 0) -> List[int]:
+    return upstream_shape_functions.stack(tensors, dim)
+
 def aten〇fft_fft〡shape(self: List[int], n: Optional[int] = None, dim: int = -1, norm: Optional[str] = None) -> List[int]:
     return self
 
@@ -1023,7 +1073,8 @@ def aten〇fft_fft〡shape(self: List[int], n: Optional[int] = None, dim: int = 
     ErrorInvocation(NonZeroDTensorWithDtype(torch.float16)),
     ErrorInvocation(NonZeroDTensorWithDtype(torch.bfloat16)),
 ])
-def aten〇fft_fft〡dtype(self_rank: int, self_dtype: int, n: Optional[int] = None, dim: int = -1, norm: Optional[str] = None) -> int:
+def aten〇fft_fft〡dtype(self_rank_dtype: Tuple[int, int], n: Optional[int] = None, dim: int = -1, norm: Optional[str] = None) -> int:
+    self_rank, self_dtype = self_rank_dtype
     if self_dtype == torch.complex64 or self_dtype == torch.complex128:
         return self_dtype
     elif self_dtype == torch.float:
@@ -1083,6 +1134,9 @@ def aten〇linalg_vector_norm〡shape(self: List[int], ord: float = 2, dim: Opti
     return upstream_shape_functions.sum_mean_dim(self, dim, keepdim, dtype)
 
 def aten〇frobenius_norm〇dim〡shape(self: List[int], dim: List[int], keepdim: bool = False) -> List[int]:
+    return upstream_shape_functions.sum_mean_dim(self, dim, keepdim, 0)
+
+def aten〇norm〇ScalarOpt_dim〡shape(self: List[int], p: Optional[float], dim: List[int], keepdim: bool = False) -> List[int]:
     return upstream_shape_functions.sum_mean_dim(self, dim, keepdim, 0)
 
 def aten〇upsample_nearest2d〡shape(self: List[int], output_size: List[int], scales_h: Optional[float] = None, scales_w: Optional[float] = None) -> List[int]:
